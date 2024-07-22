@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Decision Tree Builder</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>Decision Tree Builder</h1>
+        <div id="controls">
+            <button id="add-root-btn">Add Root Node</button>
+            <button id="add-node-btn" disabled>Add Node</button>
+            <button id="download-btn" disabled>Download JSON</button>
+        </div>
+        <div id="tree-container">
+            <!-- Decision tree will be constructed here -->
+        </div>
+        <svg width="960" height="600"></svg>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rotated Decision Tree Visualization</title>
+    <script src="https://d3js.org/d3.v6.min.js"></script>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+        #tree-container {
+            width: 100%;
+            height: 100%;
+        }
+        .node circle {
+            fill: #fff;
+            stroke: steelblue;
+            stroke-width: 2px;
+        }
+        .node text {
+            font: 12px sans-serif;
+        }
+        .link {
+            fill: none;
+            stroke: #ccc;
+            stroke-width: 1px;
+        }
+        .tooltip {
+            position: absolute;
+            text-align: center;
+            padding: 8px;
+            font: 12px sans-serif;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            pointer-events: none;
+        }
+        #fit-button {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+        }
+    </style>
+</head>
+<body>
+    <button id="fit-button">Fit to Screen</button>
+    <div id="tree-container"></div>
+
+    <script>
+        // The treeData variable will be defined here by the Python script
+        <!-- Your JSON data will be inserted here -->
+
+        // Set up the dimensions for the diagram
+        const margin = {top: 40, right: 90, bottom: 50, left: 90};
+        const width = window.innerWidth - margin.left - margin.right;
+        const height = window.innerHeight - margin.top - margin.bottom;
+
+        // Create the SVG container
+        const svg = d3.select("#tree-container")
+            .append("svg")
+            .attr("width", width + margin.left + margin.right)
+            .attr("height", height + margin.top + margin.bottom);
+
+        const g = svg.append("g")
+            .attr("transform", `translate(${margin.left},${margin.top})`);
+
+        // Add zoom behavior
+        const zoom = d3.zoom()
+            .scaleExtent([0.1, 4])
+            .on("zoom", (event) => {
+                g.attr("transform", event.transform);
+            });
+
+        svg.call(zoom);
+
+        // Create a tooltip
+        const tooltip = d3.select("body").append("div")
+            .attr("class", "tooltip")
+            .style("opacity", 0);
+
+        // Create a tree layout
+        const tree = d3.tree().size([width, height]);
+
+        // Create the root node
+        const root = d3.hierarchy(treeData.root);
+
+        // Assign unique IDs and initialize positions
+        let nodeId = 0;
+        root.eachBefore(d => {
+            d.id = nodeId++;
+            d.x0 = width / 2;
+            d.y0 = 0;
+        });
+
+        // Collapse the node and all its children
+        function collapse(d) {
+            if (d.children) {
+                d._children = d.children;
+                d._children.forEach(collapse);
+                d.children = null;
+            }
+        }
+
+        // Expand a node
+        function expand(d) {
+            if (d._children) {
+                d.children = d._children;
+                d._children = null;
+            }
+        }
+
+        // Toggle children on click
+        function click(event, d) {
+            if (d.children) {
+                collapse(d);
+            } else {
+                expand(d);
+            }
+            update(d);
+        }
+
+        // Update the tree
+        function update(source) {
+            const treeData = tree(root);
+            const nodes = treeData.descendants();
+            const links = treeData.descendants().slice(1);
+
+            nodes.forEach(d => {
+                d.y = d.depth * 180;
+            });
+
+            const node = g.selectAll('.node')
+                .data(nodes, d => d.id || (d.id = ++nodeId));
+
+            const nodeEnter = node.enter().append('g')
+                .attr('class', 'node')
+                .attr("transform", d => `translate(${source.x0},${source.y0})`)
+                .on('click', click);
+
+            nodeEnter.append('circle')
+                .attr('r', 1e-6)
+                .style("fill", d => d._children ? "lightsteelblue" : "#fff")
+                .on("mouseover", function(event, d) {
+                    tooltip.transition().duration(200).style("opacity", .9);
+                    tooltip.html(`
+                        Feature: ${d.data.feature || "Leaf"}<br/>
+                        Samples: ${d.data.samples}<br/>
+                        Probas: ${d.data.probas.map(p => p.toFixed(2)).join(", ")}<br/>
+                        Coverage: ${d.data.coverage.map(c => c.toFixed(2)).join(", ")}
+                    `)
+                    .style("left", (event.pageX + 10) + "px")
+                    .style("top", (event.pageY - 28) + "px");
+                })
+                .on("mouseout", () => tooltip.transition().duration(300).style("opacity", 0));
+
+            nodeEnter.append('text')
+                .attr("dy", ".35em")
+                .attr("x", d => d.children || d._children ? -13 : 13)
+                .attr("text-anchor", d => d.children || d._children ? "end" : "start")
+                .text(d => d.data.feature ? `${d.data.feature} <= ${d.data.value.toFixed(2)}` : "Leaf")
+                .attr("transform", "rotate(-30)");
+
+            const nodeUpdate = nodeEnter.merge(node);
+
+            nodeUpdate.transition()
+                .duration(750)
+                .attr("transform", d => `translate(${d.x},${d.y})`);
+
+            nodeUpdate.select('circle')
+                .attr('r', 5)
+                .style("fill", d => d._children ? "lightsteelblue" : "#fff")
+                .attr('cursor', 'pointer');
+
+            const nodeExit = node.exit().transition()
+                .duration(750)
+                .attr("transform", d => `translate(${source.x},${source.y})`)
+                .remove();
+
+            nodeExit.select('circle').attr('r', 1e-6);
+            nodeExit.select('text').style('fill-opacity', 1e-6);
+
+            const link = g.selectAll('path.link')
+                .data(links, d => d.id);
+
+            const linkEnter = link.enter().insert('path', "g")
+                .attr("class", "link")
+                .attr('d', d => {
+                    const o = {x: source.x0, y: source.y0};
+                    return diagonal(o, o);
+                });
+
+            const linkUpdate = linkEnter.merge(link);
+
+            linkUpdate.transition()
+                .duration(750)
+                .attr('d', d => diagonal(d, d.parent));
+
+            link.exit().transition()
+                .duration(750)
+                .attr('d', d => {
+                    const o = {x: source.x, y: source.y};
+                    return diagonal(o, o);
+                })
+                .remove();
+
+            nodes.forEach(d => {
+                d.x0 = d.x;
+                d.y0 = d.y;
+            });
+
+            function diagonal(s, d) {
+                return `M ${s.x} ${s.y}
+                        C ${s.x} ${(s.y + d.y) / 2},
+                          ${d.x} ${(s.y + d.y) / 2},
+                          ${d.x} ${d.y}`;
+            }
+        }
+
+        update(root);
+
+        // Fit to screen function
+        function fitToScreen() {
+            const bounds = g.node().getBBox();
+            const fullWidth = width + margin.left + margin.right;
+            const fullHeight = height + margin.top + margin.bottom;
+            const scale = 0.95 / Math.max(bounds.width / fullWidth, bounds.height / fullHeight);
+            const translate = [
+                fullWidth / 2 - scale * (bounds.x + bounds.width / 2),
+                fullHeight / 2 - scale * (bounds.y + bounds.height / 2)
+            ];
+
+            svg.transition().duration(750).call(
+                zoom.transform,
+                d3.zoomIdentity.translate(translate[0], translate[1]).scale(scale)
+            );
+        }
+
+        // Add event listener to the fit button
+        d3.select("#fit-button").on("click", fitToScreen);
+
+        // Initial fit to screen
+        fitToScreen();
+    </script>
+</body>
+</html>

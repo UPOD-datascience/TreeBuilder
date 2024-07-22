@@ -1,0 +1,74 @@
+{
+  "root": {
+    "name": "root-node",
+    "feature": "x1",
+    "condition": "less_than",
+    "value": 42,
+    "probas": [0.1, 0.1, 0.8], # inferred after loading
+    "coverage": [1, 1, 1], # inferred after loading
+    "children": [
+      {
+        "name": "root-child-1",
+        "pre_condition_value": true,
+        "feature": "x2",
+        "condition": "higher_than",
+        "value": 42,
+        "probas": [0.1, 0.3, 0.6], # inferred after loading
+        "coverage": [0.5, 0.2, 0.5], # inferred after loading
+        "children": [
+          {
+           "name": "child-1-1",
+           "pre_condition_value": true,
+           "feature": "x3",
+           "condition": "higher_than",
+           "value": 42,
+           "probas": [0.05, 0.9, 0.05], # inferred after loading
+           "coverage": [0.25, 0.1, 0.25], # inferred after loading
+           "children": [] # if children list is empty then, STOP
+         },
+          {
+           "name": "child-1-2",
+           "pre_condition_value": true,
+           "feature": "x4",
+           "condition": "less_than",
+           "value": 42,
+           "probas": [0.05, 0.05, 0.9], # inferred after loading
+           "coverage": [0.25, 0.1, 0.25], # inferred after loading
+           "children": [] # if children list is empty then, STOP
+         },
+        ]
+      },
+      {
+        "name": "root-child-2",
+        "pre_condition_value": false,
+        "feature": "x3",
+        "condition": "less_than",
+        "value": 3,
+        "probas": [0.7, 0.1, 0.3], # inferred after loading
+        "coverage": [0.5, 0.8, 0.5], # inferred after loading
+        "children": [
+          {
+           "name": "child-2-1",
+           "pre_condition_value": true,
+           "feature": "x3",
+           "condition": "higher_than",
+           "value": 42,
+           "probas": [0.9, 0.05, 0.05], # inferred after loading
+           "coverage": [0.25, 0.5, 0.25], # inferred after loading
+           "children": [] # if children list is empty then, STOP
+         },
+          {
+           "name": "child-2-2",
+           "pre_condition_value": true,
+           "feature": "x4",
+           "condition": "less_than",
+           "value": 42,
+           "probas": [0.05, 0.05, 0.9], # inferred after loading
+           "coverage": [0.25, 0.3, 0.25], # inferred after loading
+           "children": [] # if children list is empty then, STOP
+         },
+        ]
+      }
+    ]
+  }
+}

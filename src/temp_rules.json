@@ -1,0 +1,1 @@
+{"root": {"name": "root-node", "feature": "feature_0", "condition": "less_than", "value": 0, "children": [{"name": "left-child", "feature": "feature_1", "condition": "higher_than", "value": 0, "pre_condition_value": true, "children": []}, {"name": "right-child", "feature": "feature_2", "condition": "less_than", "value": 0, "pre_condition_value": false, "children": []}]}}
