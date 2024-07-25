@@ -2,18 +2,32 @@ import numpy as np
 import pandas as pd
 import json
 from typing import Dict, Any, List, Tuple, Union
-
-from sklearn.tree import DecisionTreeClassifier
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.exceptions import NotFittedError
 from sklearn.datasets import make_classification
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score,  f1_score, recall_score, precision_score, roc_auc_score
+from sklearn.preprocessing import LabelBinarizer
+from sklearn.model_selection import StratifiedKFold, StratifiedGroupKFold
+from sklearn.tree import DecisionTreeClassifier
+import argparse
+import benedict
+#TODO nice: add argparse to parse other .json's
+#TODO nice: add feature recombinator
+#TODO nice: option for a GradientBoostedClassifier followed by RuleFit
+
+#[x] TODO must: add higher_than_or_equal_to
+#TODO must: if root is empty, then create a decisiontree directly
+#TODO must: add YAML file with model settings
+#TODO must: add pickle function
+#TODO must: add error handling in main functions
 
 class Node:
-    def __init__(self, feature=None, threshold=None, left=None, right=None, value=None, pre_condition_value=None):
+    def __init__(self, feature=None, threshold=None, condition="less_than_or_equal",
+                 left=None, right=None, value=None, pre_condition_value=None):
         self.feature = feature
         self.threshold = threshold
+        self.condition = condition  # "less_than_or_equal", "greater_than", "less_than", "greater_than_or_equal"
         self.left = left
         self.right = right
         self.value = value
@@ -129,9 +143,13 @@ class CustomDecisionTreeV1(BaseEstimator, ClassifierMixin):
         value = node['value']
 
         if condition == 'less_than':
+            mask = X[feature] < value
+        elif condition == 'less_than_or_equal':
             mask = X[feature] <= value
-        elif condition == 'higher_than':
+        elif condition == 'greater_than':
             mask = X[feature] > value
+        elif condition == 'greater_than_or_equal':
+            mask = X[feature] >= value
         else:
             raise ValueError(f"Unknown condition: {condition}")
 
@@ -209,9 +227,13 @@ class CustomDecisionTreeV1(BaseEstimator, ClassifierMixin):
             value = node['value']
 
             if condition == 'less_than':
+                mask = X[feature] < value
+            elif condition == 'less_than_or_equal':
                 mask = X[feature] <= value
-            elif condition == 'higher_than':
+            elif condition == 'greater_than':
                 mask = X[feature] > value
+            elif condition == 'greater_than_or_equal':
+                mask = X[feature] >= value
             else:
                 raise ValueError(f"Unknown condition: {condition}")
 
@@ -259,7 +281,9 @@ class CustomDecisionTreeV1(BaseEstimator, ClassifierMixin):
 
 class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
     def __init__(self, custom_rules: Dict[str, Any] = None,
-                 criterion='gini', max_depth=None, random_state=None, prune_threshold=0.9):
+                 criterion: str='gini', max_depth: int=None, random_state: int=None,
+                 prune_threshold: float=0.9,
+                 Tree_kwargs: Dict[str, Any] = None):
         '''
         Custom decision tree builder v2; this applies the custom tree first and then continues
         building trees from the leaves of the custom tree.
@@ -270,14 +294,16 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
         :param random_state: the seed
         '''
         self.custom_rules = custom_rules
-        self.criterion = criterion
-        self.max_depth = max_depth
-        self.random_state = random_state
         self.prune_threshold = prune_threshold
         self.tree_ = None
         self.feature_names_ = None
         self.enriched_rules = None
         self.features_to_consider = None
+        self.Tree_kwargs = Tree_kwargs or None
+        if Tree_kwargs is None:
+            self.Tree_kwargs['criterion'] = criterion
+            self.Tree_kwargs['max_depth'] = max_depth
+            self.Tree_kwargs['random_state'] = random_state
 
     def fit(self, X: pd.DataFrame, y: np.ndarray):
         self.feature_names_ = X.columns.tolist()
@@ -319,12 +345,22 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
 
         # Split the data
         if node['condition'] == 'less_than':
+            left_mask = X.iloc[:, feature] < threshold
+            right_mask = ~left_mask
+        elif node['condition'] == 'less_than_or_equal':
             left_mask = X.iloc[:, feature] <= threshold
-        else:  # 'higher_than'
-            left_mask = X.iloc[:, feature] > threshold
+            right_mask = ~left_mask
+        elif node['condition'] == 'greater_than':
+            right_mask = X.iloc[:, feature] > threshold
+            left_mask = ~right_mask
+        elif node['condition'] == 'greater_than_or_equal':
+            right_mask = X.iloc[:, feature] >= threshold
+            left_mask = ~right_mask
+        else:
+            raise ValueError(f"Unknown condition: {node['condition']}")
 
         left_X, left_y = X[left_mask], y[left_mask.values]
-        right_X, right_y = X[~left_mask], y[~left_mask.values]
+        right_X, right_y = X[right_mask], y[right_mask.values]
 
         # Create the current node
         current_node = Node(feature=feature, threshold=threshold)
@@ -342,9 +378,9 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
 
         # If a child is not set, create a leaf node
         if current_node.left is None:
-            current_node.left = Node(value=np.bincount(left_y, minlength=self.n_classes_))
+            current_node.left = Node(value=np.bincount(left_y, minlength=self.n_classes_), condition=node['condition'])
         if current_node.right is None:
-            current_node.right = Node(value=np.bincount(right_y, minlength=self.n_classes_))
+            current_node.right = Node(value=np.bincount(right_y, minlength=self.n_classes_), condition=node['condition'])
 
         return current_node
 
@@ -353,8 +389,7 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
             if node.feature is None:
                 # This is a leaf in the custom tree, continue with DecisionTreeClassifier
                 features_to_use = [f for f in self.features_to_consider if f in node_X.columns]
-                subtree = DecisionTreeClassifier(criterion=self.criterion, max_depth=self.max_depth,
-                                                 random_state=self.random_state)
+                subtree = DecisionTreeClassifier(**self.Tree_kwargs)
                 subtree.fit(node_X[features_to_use], node_y)
 
                 # Replace the leaf with the subtree
@@ -443,9 +478,13 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
             value = node['value']
 
             if condition == 'less_than':
+                mask = X[feature] < value
+            elif condition == 'less_than_or_equal':
                 mask = X[feature] <= value
-            elif condition == 'higher_than':
+            elif condition == 'greater_than':
                 mask = X[feature] > value
+            elif condition == 'greater_than_or_equal':
+                mask = X[feature] >= value
             else:
                 raise ValueError(f"Unknown condition: {condition}")
 
@@ -512,7 +551,17 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
                     "coverage": numpy_to_python(node_coverage.tolist())
                 }, node_mask
             else:
-                node_mask = node_X.iloc[:, node.feature] <= node.threshold
+                if node.condition == 'less_than':
+                    node_mask = node_X.iloc[:, node.feature] < node.threshold
+                elif node.condition == 'less_than_or_equal':
+                    node_mask = node_X.iloc[:, node.feature] <= node.threshold
+                elif node.condition == 'higher_than':
+                    node_mask = node_X.iloc[:, node.feature] > node.threshold
+                elif node.condition == 'higher_than_or_equal':
+                    node_mask = node_X.iloc[:, node.feature] >= node.threshold
+                else:
+                    raise ValueError(f"Unknown condition: {node.condition}")
+
                 left_X, left_y = node_X[node_mask], node_y[node_mask]
                 right_X, right_y = node_X[~node_mask], node_y[~node_mask]
 
@@ -526,7 +575,7 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
                 result = {
                     "name": f"node-{self.feature_names_[node.feature]}",
                     "feature": self.feature_names_[node.feature],
-                    "condition": "less_than",
+                    "condition": node.condition,  # Use the node's condition
                     "value": numpy_to_python(node.threshold),
                     "samples": numpy_to_python(len(node_y)),
                     "probas": numpy_to_python(node_probas.tolist()),
@@ -536,13 +585,84 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
 
                 return result, node_mask
 
-        final_tree, _ = extract_node(self.tree_, X, y)
-        return {"root": final_tree}
+    def generate_metrics(self, X: pd.DataFrame = None,
+                         y: np.ndarray = None,
+                         split_column: str = None,
+                         num_splits: int = 10,
+                         group_col: str = None) -> List:
+        '''
+        Generate metrics based on the splits in the split_column, or generate a Stratified split result if
+        split_column is empty, if group_col is not None use StratifiedGroup folding.
+        '''
 
+        if X is None or y is None:
+            raise ValueError("Both X and y must be provided.")
 
+        performance_list = []
+
+        # Get the custom decision tree
+        custom_tree = self  # Assuming this method is part of the CustomDecisionTree class
+
+        # Make the splitter
+        if split_column:
+            splits = X[split_column].unique()
+            if len(splits) < num_splits:
+                num_splits = len(splits)
+        elif group_col:
+            splitter = StratifiedGroupKFold(n_splits=num_splits, shuffle=True, random_state=42)
+            splits = list(splitter.split(X, y, groups=X[group_col]))
+        else:
+            splitter = StratifiedKFold(n_splits=num_splits, shuffle=True, random_state=42)
+            splits = list(splitter.split(X, y))
+
+        # Prepare for multi-class ROC AUC
+        lb = LabelBinarizer()
+        y_bin = lb.fit_transform(y)
+        n_classes = y_bin.shape[1]
+
+        # Go through the splits, perform train/test scoring with f1, recall, precision, roc_auc per class
+        for i in range(num_splits):
+            if split_column:
+                train_idx = X[split_column] != splits[i]
+                test_idx = X[split_column] == splits[i]
+            else:
+                train_idx, test_idx = splits[i]
+
+            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+
+            # Fit the custom decision tree
+            custom_tree.fit(X_train, y_train)
+
+            # Make predictions
+            y_pred = custom_tree.predict(X_test)
+            y_pred_proba = custom_tree.predict_proba(X_test)
+
+            # Calculate metrics
+            metrics = {
+                'split': i,
+                'f1_micro': f1_score(y_test, y_pred, average='micro'),
+                'f1_macro': f1_score(y_test, y_pred, average='macro'),
+                'recall_micro': recall_score(y_test, y_pred, average='micro'),
+                'recall_macro': recall_score(y_test, y_pred, average='macro'),
+                'precision_micro': precision_score(y_test, y_pred, average='micro'),
+                'precision_macro': precision_score(y_test, y_pred, average='macro'),
+            }
+
+            # Calculate ROC AUC for each class
+            for j in range(n_classes):
+                metrics[f'roc_auc_class_{j}'] = roc_auc_score(y_bin[test_idx][:, j], y_pred_proba[:, j])
+
+            performance_list.append(metrics)
+
+        return performance_list
 def generate_sample_rules():
     """Generate a sample rule set for testing purposes."""
     rules = {
+        "target_col": "Diagnosis",
+        "fold_split_col": "Dataset",
+        "features_to_use": [],
+        "categorical_columns": [],
         "root": {
             "name": "root-node",
             "feature": "feature_0",
@@ -584,85 +704,145 @@ def update_html(html_path: str="./treeTemplate.html",
         file.write(html_content)
 
 
+
+
 if __name__ == "__main__":
-    # Generate a sample dataset
-    X, y = make_classification(n_samples=1000, n_features=10, n_informative=5, n_redundant=2,
-                               n_classes=2, random_state=42)
+    argparser = argparse.ArgumentParser(description="Tree parser")
+    argparser.add_argument("--rules_path", type=str, default=None)
+    argparser.add_argument("--data_path", type=str, default=None)
+    argparser.add_argument("--make_viz", type=bool, default=True)
+    argparser.add_argument("--tree_config", type=str, default=None)
+    parsed = argparser.parse_args()
 
-    # Convert to DataFrame for named features
-    feature_names = [f"feature_{i}" for i in range(X.shape[1])]
-    X = pd.DataFrame(X, columns=feature_names)
+    rules_path = parsed['rules_path']
+    data_path = parsed['data_path']
+    make_viz = parsed['make_viz']
+    tree_config = parsed['tree_config']
 
-    # Split the data
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    if tree_config is not None:
+        # use benedict to open the YAML file
+        TreeKwargs = benedict.benedict.from_yaml(tree_config)
+    else:
+        TreeKwargs = {'criterion': 'gini',
+                      'max_depth': 5,
+                      'random_state': 42}
 
-    # Generate sample rules and save to a temporary file
-    rules = generate_sample_rules()
-    with open("temp_rules.json", "w") as f:
-        json.dump(rules, f)
+    if data_path is not None:
+        # must be parquet
 
-    # Load the rules
-    rules_loader = LoadRules("temp_rules.json")
-    processed_rules = rules_loader.get_processed_rules()
+        # Load the dataset
 
-    # Create and train the custom decision tree
-    print("CustomDecisionTreeV1")
-    print(30 * "+")
-    clf = CustomDecisionTreeV1(custom_rules=processed_rules, criterion='gini', max_depth=5, random_state=42,
-                             prune_threshold=0.95)
-    clf.fit(X_train, y_train)
+        # make train/test
 
-    # Make predictions
-    y_pred = clf.predict(X_test)
 
-    # Calculate accuracy
-    accuracy = accuracy_score(y_test, y_pred)
-    print(f"Model accuracy: {accuracy:.4f}")
+    if rules_path is not None:
+        print(f"Processing rules from {rules_path}")
+        print(f"Data from {data_path}")
+        
+        rules_loader = LoadRules(rules_path)
+        processed_rules = rules_loader.get_processed_rules()
 
-    # Get and print enriched rules
-    enriched_rules = clf.get_enriched_rules()
-    print("\nEnriched Rules:")
-    print(json.dumps(enriched_rules, indent=2))
+        clf = CustomDecisionTreeV2(custom_rules=processed_rules, Tree_kwargs=TreeKwargs)
+        clf.fit(X_train, y_train)
+        # Make predictions
+        y_pred = clf.predict(X_test)
+        # Calculate accuracy
+        accuracy = accuracy_score(y_test, y_pred)
+        print(f"Model accuracy: {accuracy:.4f}")
 
-    with open("temp_rules_enriched_v1.json", "w") as f:
-        json.dump(enriched_rules, f)
+        # Get and print enriched rules
+        enriched_rules = clf.get_enriched_rules()
+        print("\nEnriched Rules:")
+        print(json.dumps(enriched_rules, indent=2))
+        with open("temp_rules_enriched_v2.json", "w") as f:
+            json.dump(enriched_rules, f)
 
-    print(30*"+")
-    print("CustomDecisionTreeV2")
-    print(30 * "+")
+        final_tree = clf.get_custom_rules_model(X_train, y_train)
+        print("\nFinal Custom Decision Tree:")
+        print(json.dumps(final_tree, indent=3))
+        print(30 * "-")
+        with open("temp_rules_final_tree_v2.json", "w") as f:
+            json.dump(final_tree, f)
+        print("\nWriting html for tree:")
+        update_html(tree=final_tree)
+    else:
+        # Assume basic test
+        # Generate a sample dataset
+        X, y = make_classification(n_samples=1000, n_features=10, n_informative=5, n_redundant=2,
+                                   n_classes=2, random_state=42)
 
-    clf = CustomDecisionTreeV2(custom_rules=processed_rules, criterion='gini', max_depth=5, random_state=42)
-    clf.fit(X_train, y_train)
+        # Convert to DataFrame for named features
+        feature_names = [f"feature_{i}" for i in range(X.shape[1])]
+        X = pd.DataFrame(X, columns=feature_names)
 
-    # Make predictions
-    y_pred = clf.predict(X_test)
+        # Split the data
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # Calculate accuracy
-    accuracy = accuracy_score(y_test, y_pred)
-    print(f"Model accuracy: {accuracy:.4f}")
+        # Generate sample rules and save to a temporary file
+        rules = generate_sample_rules()
+        with open("temp_rules.json", "w") as f:
+            json.dump(rules, f)
 
-    # Get and print enriched rules
-    enriched_rules = clf.get_enriched_rules()
-    print("\nEnriched Rules:")
-    print(json.dumps(enriched_rules, indent=2))
-    with open("temp_rules_enriched_v2.json", "w") as f:
-        json.dump(enriched_rules, f)
+        # Load the rules
+        rules_loader = LoadRules("temp_rules.json")
+        processed_rules = rules_loader.get_processed_rules()
 
-    final_tree = clf.get_custom_rules_model(X_train, y_train)
-    print("\nFinal Custom Decision Tree:")
-    print(json.dumps(final_tree, indent=3))
-    print(30 * "-")
-    with open("temp_rules_final_tree_v2.json", "w") as f:
-        json.dump(final_tree, f)
+        # Create and train the custom decision tree
+        print("CustomDecisionTreeV1")
+        print(30 * "+")
+        clf = CustomDecisionTreeV1(custom_rules=processed_rules, criterion='gini', max_depth=5, random_state=42,
+                                 prune_threshold=0.95)
+        clf.fit(X_train, y_train)
 
-    # Compare with standard DecisionTreeClassifier
-    from sklearn.tree import DecisionTreeClassifier
+        # Make predictions
+        y_pred = clf.predict(X_test)
 
-    std_clf = DecisionTreeClassifier(criterion='gini', max_depth=5, random_state=42)
-    std_clf.fit(X_train, y_train)
-    std_y_pred = std_clf.predict(X_test)
-    std_accuracy = accuracy_score(y_test, std_y_pred)
-    print(f"\nStandard DecisionTreeClassifier accuracy: {std_accuracy:.4f}")
+        # Calculate accuracy
+        accuracy = accuracy_score(y_test, y_pred)
+        print(f"Model accuracy: {accuracy:.4f}")
 
-    print("\nWriting html for tree:")
-    update_html(tree=final_tree)
+        # Get and print enriched rules
+        enriched_rules = clf.get_enriched_rules()
+        print("\nEnriched Rules:")
+        print(json.dumps(enriched_rules, indent=2))
+
+        with open("temp_rules_enriched_v1.json", "w") as f:
+            json.dump(enriched_rules, f)
+
+        print(30*"+")
+        print("CustomDecisionTreeV2")
+        print(30 * "+")
+
+        clf = CustomDecisionTreeV2(custom_rules=processed_rules, criterion='gini', max_depth=5, random_state=42)
+        clf.fit(X_train, y_train)
+
+        # Make predictions
+        y_pred = clf.predict(X_test)
+
+        # Calculate accuracy
+        accuracy = accuracy_score(y_test, y_pred)
+        print(f"Model accuracy: {accuracy:.4f}")
+
+        # Get and print enriched rules
+        enriched_rules = clf.get_enriched_rules()
+        print("\nEnriched Rules:")
+        print(json.dumps(enriched_rules, indent=2))
+        with open("temp_rules_enriched_v2.json", "w") as f:
+            json.dump(enriched_rules, f)
+
+        final_tree = clf.get_custom_rules_model(X_train, y_train)
+        print("\nFinal Custom Decision Tree:")
+        print(json.dumps(final_tree, indent=3))
+        print(30 * "-")
+        with open("temp_rules_final_tree_v2.json", "w") as f:
+            json.dump(final_tree, f)
+
+        # Compare with standard DecisionTreeClassifier
+        std_clf = DecisionTreeClassifier(criterion='gini', max_depth=5, random_state=42)
+        std_clf.fit(X_train, y_train)
+        std_y_pred = std_clf.predict(X_test)
+        std_accuracy = accuracy_score(y_test, std_y_pred)
+        print(f"\nStandard DecisionTreeClassifier accuracy: {std_accuracy:.4f}")
+
+        print("\nWriting html for tree:")
+        update_html(tree=final_tree)

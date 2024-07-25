@@ -1,0 +1,6 @@
+{
+  "target_col": "Diagnosis",  
+  "fold_split_col": "Dataset",
+  "features_to_use":  ["qrs_vector mean lead_0", "qrs_ampl mean lead_0", "qrs_vector mean lead_1", "qrs_ampl mean lead_1", "qrs_vector mean lead_2", "qrs_ampl mean lead_2", "qrs_vector mean lead_3", "qrs_ampl mean lead_3", "qrs_vector mean lead_4", "qrs_ampl mean lead_4", "qrs_vector mean lead_5", "qrs_ampl mean lead_5", "qrs_vector mean lead_6", "qrs_ampl mean lead_6", "qrs_vector mean lead_7", "qrs_ampl mean lead_7", "morphology lead_0", "morphology lead_1", "morphology lead_2", "morphology lead_3", "morphology lead_4", "morphology lead_5", "morphology lead_6", "morphology lead_7"],  
+  "root": {}
+}

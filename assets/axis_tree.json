@@ -1,0 +1,7 @@
+{
+  "features_to_use": ["qrs_vector mean lead_0","p_vector mean lead_0", "t_vector mean lead_0", "qrs_vector mean lead_1", "p_vector mean lead_1", "t_vector mean lead_1", "qrs_vector mean lead_2", "p_vector mean lead_2", "t_vector mean lead_2", "qrs_vector mean lead_3", "p_vector mean lead_3", "t_vector mean lead_3", "qrs_vector mean lead_4", "p_vector mean lead_4", "t_vector mean lead_4", "qrs_vector mean lead_5", "p_vector mean lead_5", "t_vector mean lead_5", "qrs_vector mean lead_6", "p_vector mean lead_6", "t_vector mean lead_6", "qrs_vector mean lead_7", "p_vector mean lead_7", "t_vector mean lead_7"], 
+  "target_col": "Heart Axis Diagnosis",
+  "fold_split_col": "Dataset",
+  "max_depth": 5,
+  "root": {}
+}

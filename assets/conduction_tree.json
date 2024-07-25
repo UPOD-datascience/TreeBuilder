@@ -1,0 +1,73 @@
+{
+  "fold_split_col": "Dataset",
+  "target_col": "Diagnosis",
+  "root": {
+    "name": "root-node",
+    "feature": "QRS_duration mean",
+    "condition": "higher_than_or_equal_to",
+    "value": 110,                                    
+        "children": [
+          {
+            "name": "root-child-1",
+            "pre_condition_value": true,
+            "feature": "QRS_duration mean",
+            "condition": "higher_than_or_equal_to",
+            "value": 120,
+            "ignore_after": ["Diagnosis",  // so both if the QRS-duration is >120 or <120, for the next splits, don"t use these features, but do use the rest 
+                             "Heart Axis Diagnosis",
+                             "Dataset",
+                             "QQ_intervals mean",
+                             "HRs mean",
+                             "PQ_duration mean",
+                             "QT_duration mean",
+                             "QTc_duration mean",
+                             "T_duration mean",
+                             "P_duration mean",
+                             "QRS_duration mean"],
+          },
+
+          {
+            "name": "root-child-2", // for the splits after the condition qrs >110 is false, from the two lists in features_to_use_at_least, the order or the amount or splits doesnt matter,
+                                    // but from both lists, at least 1 feature should be used (but preferably not a million splits in order to keep it explainable)
+            "pre_condition_value": false,
+            "feature": [],
+            "condition":[] ,
+            "value":[] ,
+            "features_to_use_next":  ["morphology lead_0", // use at least one of the morphologies 
+                                 "morphology lead_1",
+                                 "morphology lead_2",
+                                 "morphology lead_3",
+                                 "morphology lead_4",
+                                 "morphology lead_5",
+                                 "morphology lead_6",
+                                 "morphology lead_7",
+                                 "qrs_vector mean lead_0",
+                                 "p_vector mean lead_0",
+                                 "t_vector mean lead_0",
+                                 "qrs_vector mean lead_1",
+                                 "p_vector mean lead_1",
+                                 "t_vector mean lead_1",
+                                 "qrs_vector mean lead_2",
+                                 "p_vector mean lead_2",
+                                 "t_vector mean lead_2",
+                                 "qrs_vector mean lead_3",
+                                 "p_vector mean lead_3",
+                                 "t_vector mean lead_3",
+                                 "qrs_vector mean lead_4",
+                                 "p_vector mean lead_4",
+                                 "t_vector mean lead_4",
+                                 "qrs_vector mean lead_5",
+                                 "p_vector mean lead_5",
+                                 "t_vector mean lead_5",
+                                 "qrs_vector mean lead_6",
+                                 "p_vector mean lead_6",
+                                 "t_vector mean lead_6",
+                                 "qrs_vector mean lead_7",
+                                 "p_vector mean lead_7",
+                                 "t_vector mean lead_7"],
+         },    
+        ]
+
+    }
+}
+       
