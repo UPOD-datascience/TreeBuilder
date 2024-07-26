@@ -1,6 +1,7 @@
 {
   "fold_split_col": "Dataset",
   "target_col": "Diagnosis",
+  "features_to_use": [],
   "root": {
     "name": "root-node",
     "feature": "QRS_duration mean",
