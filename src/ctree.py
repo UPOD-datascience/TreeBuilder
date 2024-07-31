@@ -12,6 +12,7 @@ from sklearn.model_selection import StratifiedKFold, StratifiedGroupKFold
 from sklearn.tree import DecisionTreeClassifier
 import argparse
 import benedict
+import dotenv
 #TODO nice: add argparse to parse other .json's
 #TODO nice: add feature recombinator
 #TODO nice: option for a GradientBoostedClassifier followed by RuleFit
@@ -708,10 +709,10 @@ def update_html(html_path: str="./treeTemplate.html",
 
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser(description="Tree parser")
-    argparser.add_argument("--rules_path", type=str, default=None)
-    argparser.add_argument("--data_path", type=str, default=None)
-    argparser.add_argument("--make_viz", type=bool, default=True)
-    argparser.add_argument("--tree_config", type=str, default=None)
+    argparser.add_argument("--rules_path", type=str, default=None, required=True)
+    argparser.add_argument("--data_path", type=str, default=None, required=True)
+    argparser.add_argument("--make_viz", type=bool, default=True, required=False)
+    argparser.add_argument("--tree_config", type=str, default=None, required=True)
     parsed = argparser.parse_args()
 
     rules_path = parsed['rules_path']
@@ -729,9 +730,9 @@ if __name__ == "__main__":
 
     if data_path is not None:
         # must be parquet
-
+        assert(data_path.endswith('.parquet')), 'File must be a parquet, sorry not sorry'
         # Load the dataset
-
+        df = pd.read_parquet(data_path)
         # make train/test
 
 

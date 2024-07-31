@@ -1,6 +1,7 @@
 {
   "fold_split_col": "Dataset",
   "target_col": "Diagnosis",
+  "ignore_cols": ["Heart Axis Diagnosis"],
   "features_to_use": [],
   "root": {
     "name": "root-node",
@@ -14,7 +15,7 @@
             "feature": "QRS_duration mean",
             "condition": "higher_than_or_equal_to",
             "value": 120,
-            "ignore_after": ["Diagnosis",  // so both if the QRS-duration is >120 or <120, for the next splits, don"t use these features, but do use the rest 
+            "ignore_after": ["Diagnosis",
                              "Heart Axis Diagnosis",
                              "Dataset",
                              "QQ_intervals mean",
@@ -24,16 +25,15 @@
                              "QTc_duration mean",
                              "T_duration mean",
                              "P_duration mean",
-                             "QRS_duration mean"],
+                             "QRS_duration mean"]
           },
           {
-            "name": "root-child-2", // for the splits after the condition qrs >110 is false, from the two lists in features_to_use_at_least, the order or the amount or splits doesnt matter,
-                                    // but from both lists, at least 1 feature should be used (but preferably not a million splits in order to keep it explainable)
+            "name": "root-child-2",
             "pre_condition_value": false,
             "feature": [],
             "condition":[] ,
             "value":[] ,
-            "features_to_use_next":  ["morphology lead_0", // use at least one of the morphologies 
+            "features_to_use_next":  ["morphology lead_0",
                                      "morphology lead_1",
                                      "morphology lead_2",
                                      "morphology lead_3",
@@ -64,8 +64,8 @@
                                      "t_vector mean lead_6",
                                      "qrs_vector mean lead_7",
                                      "p_vector mean lead_7",
-                                     "t_vector mean lead_7"],
-         },    
+                                     "t_vector mean lead_7"]
+         }
         ]
 
     }
