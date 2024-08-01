@@ -30,9 +30,9 @@
           {
             "name": "root-child-2",
             "pre_condition_value": false,
-            "feature": [],
-            "condition":[] ,
-            "value":[] ,
+            "feature": null,
+            "condition": null,
+            "value":null ,
             "features_to_use_next":  ["morphology lead_0",
                                      "morphology lead_1",
                                      "morphology lead_2",
