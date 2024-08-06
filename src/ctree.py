@@ -12,6 +12,11 @@ from sklearn.model_selection import StratifiedKFold, StratifiedGroupKFold
 from sklearn.tree import DecisionTreeClassifier
 import argparse
 import benedict
+
+from sklearn.utils.validation import check_X_y, check_array, check_is_fitted, column_or_1d
+from sklearn.utils.multiclass import unique_labels, type_of_target
+
+
 import dotenv
 #TODO nice: add argparse to parse other .json's
 #TODO nice: add feature recombinator
@@ -22,6 +27,10 @@ import dotenv
 #TODO must: add YAML file with model settings
 #TODO must: add pickle function
 #TODO must: add error handling in main functions
+import logging
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 class Node:
     def __init__(self, feature=None, threshold=None, condition="less_than_or_equal",
@@ -38,18 +47,26 @@ class RuleNode:
     def __init__(self, name: str,
                  feature: Optional[str],
                  condition: Optional[Union[str, List[str]]],
-                 value: Optional[Any],
+                 threshold: Optional[float] = None,
+                 class_counts: Optional[List[int]] = None,
                  ignore_after: Optional[List[str]] = None,
                  features_to_use_next: Optional[List[str]] = None,
-                 pre_condition_value: Optional[Any] = None):
+                 pre_condition_value: Optional[Any] = None,
+                 is_custom: bool = False,
+                 samples: int = 0):
         self.name = self._validate_non_empty_string(name, "name")
         self.feature = self._validate_feature(feature)
         self.condition = self._validate_condition(condition)
-        self.value = value  # No validation for value as it can be None or any type
+        self.threshold = threshold
+        self.class_counts = class_counts
         self.ignore_after = ignore_after or []
         self.features_to_use_next = features_to_use_next or []
         self.pre_condition_value = pre_condition_value
         self.children: List[RuleNode] = []
+        self.probas = None
+        self.coverage = None
+        self.is_custom = is_custom
+        self.samples = samples
 
     @staticmethod
     def _validate_non_empty_string(value: str, field_name: str) -> str:
@@ -98,7 +115,9 @@ class RuleNode:
         else:
             raise ValueError("condition must be either a string or a list of strings")
 
-    def add_child(self, child: 'RuleNode') -> None:
+    def add_child(self, child: 'RuleNode', preserve_custom: bool = True) -> None:
+        if preserve_custom:
+            child.is_custom = self.is_custom
         self.children.append(child)
 
 class LoadRules:
@@ -120,9 +139,11 @@ class LoadRules:
             name=node["name"],
             feature=node.get("feature"),
             condition=node.get("condition"),
-            value=node.get("value"),
+            threshold=node.get("value"),  # Use 'value' as threshold for internal nodes
+            class_counts=None,  # This will be set during tree building
             ignore_after=node.get("ignore_after"),
-            features_to_use_next=node.get("features_to_use_next")
+            features_to_use_next=node.get("features_to_use_next"),
+            is_custom=True
         )
 
         if "pre_condition_value" in node:
@@ -140,7 +161,11 @@ class LoadRules:
 class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
     def __init__(self,
                  custom_rules: Union[Dict[str, Any], RuleNode] = None,
-                 criterion: str='gini', max_depth: int=None, random_state: int=None,
+                 criterion: str='gini', 
+                 max_depth: int = None,
+                 min_samples_split: int = 2,
+                 min_samples_leaf: int = 1,
+                 random_state: int=None,
                  prune_threshold: float=0.9,
                  Tree_kwargs: Dict[str, Any] = None):
         '''
@@ -152,50 +177,128 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
         :param max_depth: maximum depth of the decision tree
         :param random_state: the seed
         '''
+        super().__init__()
         self.custom_rules = custom_rules
         self.prune_threshold = prune_threshold
         self.tree_ = None
         self.feature_names_ = None
         self.enriched_rules = None
         self.features_to_consider = None
+        self.classes_ = None
+        self.n_classes_ = None    
+        
+        self.criterion = criterion
+        self.max_depth = max_depth
+        self.min_samples_split = min_samples_split
+        self.min_samples_leaf = min_samples_leaf
+        self.random_state = random_state
+        
         self.Tree_kwargs = Tree_kwargs or {}
-        if Tree_kwargs is None:
+        if Tree_kwargs is {}:
             self.Tree_kwargs['criterion'] = criterion
             self.Tree_kwargs['max_depth'] = max_depth
+            self.Tree_kwargs['min_samples_split'] = min_samples_split
+            self.Tree_kwargs['min_samples_leaf'] = min_samples_leaf
             self.Tree_kwargs['random_state'] = random_state
 
+    def get_params(self, deep=True):
+        """Get parameters for this estimator.
+
+        This method is overridden to explicitly list all parameters.
+        """
+        return {
+            "custom_rules": self.custom_rules,
+            "criterion": self.criterion,
+            "max_depth": self.max_depth,
+            "min_samples_split": self.min_samples_split,
+            "min_samples_leaf": self.min_samples_leaf,
+            "random_state": self.random_state,
+            "prune_threshold": self.prune_threshold
+        }
+
+    def set_params(self, **params):
+        """Set the parameters of this estimator."""
+        for key, value in params.items():
+            setattr(self, key, value)
+        return self
+
     def fit(self, X: pd.DataFrame, y: np.ndarray):
+        # Store additional attributes set during fitting
+        self.tree_ = None
         self.feature_names_ = X.columns.tolist()
         self.classes_ = np.unique(y)
         self.n_classes_ = len(self.classes_)
-
-        # Extract features to consider for continuation
         self.features_to_consider = self._get_features_to_consider(X)
+        logger.info("Starting fit method")
+        try:
+            # Check that X is a DataFrame
+            if not isinstance(X, pd.DataFrame):
+                raise ValueError("X must be a pandas DataFrame")
 
-        # Create the initial tree structure based on custom rules
-        if isinstance(self.custom_rules, dict):
-            self.tree_ = self._build_custom_tree(self.custom_rules['root'], X, y)
-        elif isinstance(self.custom_rules, RuleNode):
-            self.tree_ = self.custom_rules
-        else:
-            raise ValueError("custom_rules must be either a dictionary or a RuleNode object")
+            # Validate X
+            check_array(X, force_all_finite='allow-nan', ensure_2d=True, dtype=None)
+            
+            # Validate y
+            y = column_or_1d(y, warn=True)
+            check_array(y, ensure_2d=False, dtype=None)
 
-        # Continue building the tree with DecisionTreeClassifier at the leaves
-        self._continue_tree_building(X, y)
+            # Check that X and y have the same first dimension
+            if X.shape[0] != y.shape[0]:
+                raise ValueError("X and y must have the same number of samples")
+            
+            # Check that y is a valid target type
+            target_type = type_of_target(y)
+            if target_type not in ['binary', 'multiclass']:
+                raise ValueError("Unknown label type: %r" % target_type)
 
-        # Prune the tree if a threshold is set
-        if self.prune_threshold is not None:
-            self._prune_tree(self.tree_)
+            # Store the classes seen during fit
+            self.classes_ = unique_labels(y)
+            self.n_classes_ = len(self.classes_)
+            self.feature_names_ = X.columns.tolist()
 
-        # Enrich custom tree with probabilities and coverage
-        self.enriched_rules = self.enrich_custom_tree(X, y)
+            logger.info(f"Number of features: {len(self.feature_names_)}")
+            logger.info(f"Number of classes: {self.n_classes_}")
+
+            # Extract features to consider for continuation
+            self.features_to_consider = self._get_features_to_consider(X)
+            logger.info(f"Features to consider: {self.features_to_consider}")
+
+            # Create the initial tree structure based on custom rules
+            if isinstance(self.custom_rules, dict):
+                logger.info(f"Initial tree structure - Dictionary")
+                self.tree_ = self._build_custom_tree(self.custom_rules['root'], X, y)
+            elif isinstance(self.custom_rules, RuleNode):
+                logger.info(f"Initial tree structure - RuleNode")
+                self.tree_ = self.process_custom_rules(self.custom_rules, X, y)
+            else:
+                raise ValueError("custom_rules must be either a dictionary or a RuleNode object")
+
+            logger.info("Initial tree structure created")
+
+            # Continue building the tree with DecisionTreeClassifier at the leaves
+            self._continue_tree_building(X, y)
+            logger.info("Tree building completed")
+
+            # Enrich custom tree with probabilities and coverage
+            self.enriched_rules = self.enrich_custom_tree(X, y)
+            logger.info("Tree enrichment completed")
+
+            # Prune the tree if a threshold is set
+            if self.prune_threshold is not None:
+                self._prune_tree(self.tree_)
+                logger.info("Tree pruning completed")
+
+        except Exception as e:
+            logger.error(f"An error occurred during fitting: {str(e)}", exc_info=True)
+            raise
 
         return self
     def _get_matching_features(self, feature_list: List[str], all_features: List[str]) -> List[str]:
         """
         Find all features in all_features that contain any of the strings in feature_list.
         """
-        return [f for f in all_features if any(spec in f for spec in feature_list)]
+        self.features_to_use =[f for f in all_features if any(spec in f for spec in feature_list)]
+        return self.features_to_use
 
     def _get_features_to_consider(self, X: pd.DataFrame) -> List[str]:
         all_features = X.columns.tolist()
@@ -212,10 +315,58 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
             return [f for f in all_features if f not in ignore_features]
         return all_features
 
-    def _build_custom_tree(self, node: Dict[str, Any], X: pd.DataFrame, y: np.ndarray) -> RuleNode:
+    def process_custom_rules(self, node: RuleNode, X: pd.DataFrame, y: np.ndarray) -> RuleNode:
+        if node is None:
+            return None
+
+        node.samples = len(y)
+        node.class_counts = np.bincount(y, minlength=self.n_classes_).tolist()
+
+        if node.feature is None:
+            # This is a leaf node
+            return node
+
+        # This is an internal node
+        if node.condition == 'less_than':
+            mask = X[node.feature] < node.threshold
+        elif node.condition == 'less_than_or_equal':
+            mask = X[node.feature] <= node.threshold
+        elif node.condition == 'greater_than':
+            mask = X[node.feature] > node.threshold
+        elif node.condition == 'greater_than_or_equal':
+            mask = X[node.feature] >= node.threshold
+        else:
+            raise ValueError(f"Unknown condition: {node.condition}")
+
+        # Process children
+        if not node.children:
+            # If children don't exist, create them
+            left_child = RuleNode(name="left_child", feature=None, condition=None,
+                                  class_counts=None,  # Will be set in recursive call
+                                  ignore_after=node.ignore_after,
+                                  features_to_use_next=node.features_to_use_next,
+                                  is_custom=True)
+            right_child = RuleNode(name="right_child", feature=None, condition=None,
+                                   class_counts=None,  # Will be set in recursive call
+                                   ignore_after=node.ignore_after,
+                                   features_to_use_next=node.features_to_use_next,
+                                   is_custom=True)
+            node.add_child(left_child)
+            node.add_child(right_child)
+
+        node.children[0] = self.process_custom_rules(node.children[0], X[mask], y[mask])
+        node.children[1] = self.process_custom_rules(node.children[1], X[~mask], y[~mask])
+
+        return node
+    def _build_custom_tree(self, node: Dict[str, Any],
+                           X: pd.DataFrame,
+                           y: np.ndarray) -> RuleNode:
         if 'feature' not in node:
             # This is a leaf node
-            return RuleNode(name="leaf", feature=None, condition=None, value=np.bincount(y, minlength=self.n_classes_).tolist())
+            return RuleNode(name="leaf", feature=None, condition=None,
+                            value=np.bincount(y, minlength=self.n_classes_).tolist(),
+                            samples=len(y),
+                            is_custom=True)
 
         feature = self._get_matching_features([node['feature']], X.columns)[0]  # Get the first matching feature
         condition = node['condition']
@@ -240,8 +391,12 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
         right_X, right_y = X[right_mask], y[right_mask]
 
         # Create the current node
-        current_node = RuleNode(name=node['name'], feature=feature, condition=condition, value=threshold,
-                                ignore_after=ignore_after, features_to_use_next=features_to_use_next)
+        current_node = RuleNode(name=node['name'],
+                                feature=feature, condition=condition, value=threshold,
+                                ignore_after=ignore_after,
+                                features_to_use_next=features_to_use_next,
+                                is_custom=True,
+                                samples=len(y))
 
         # Process children if they exist
         if 'children' in node and node['children']:
@@ -249,148 +404,283 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
                 pre_condition_value = child.get('pre_condition_value', True)
                 child_node = self._build_custom_tree(child, left_X if pre_condition_value else right_X,
                                                      left_y if pre_condition_value else right_y)
-                current_node.add_child(child_node)
+                current_node.add_child(child_node, preserve_custom=True)
 
         # If a child is not set, create a leaf node
         if len(current_node.children) == 0:
-            current_node.add_child(RuleNode(name="left_leaf", feature=None, condition=None,
-                                            value=np.bincount(left_y, minlength=self.n_classes_).tolist()))
-            current_node.add_child(RuleNode(name="right_leaf", feature=None, condition=None,
-                                            value=np.bincount(right_y, minlength=self.n_classes_).tolist()))
+            left_leaf = RuleNode(name="left_leaf", feature=None, condition=None,
+                                            value=np.bincount(left_y,
+                                            minlength=self.n_classes_).tolist(),
+                                            is_custom=True,
+                                            samples=len(left_y))
+            right_leaf = RuleNode(name="right_leaf", feature=None, condition=None,
+                                            value=np.bincount(right_y,
+                                            minlength=self.n_classes_).tolist(),
+                                            is_custom=True,
+                                            samples=len(right_y))
+            current_node.add_child(left_leaf, preserve_custom=True)
+            current_node.add_child(right_leaf, preserve_custom=True)
+
 
         return current_node
 
     def _continue_tree_building(self, X: pd.DataFrame, y: np.ndarray):
-        def build_subtree(node: RuleNode, node_X: pd.DataFrame, node_y: np.ndarray):
-            if node.feature is None:
-                # This is a leaf in the custom tree, continue with DecisionTreeClassifier
-                features_to_use = self._get_matching_features(node.features_to_use_next, node_X.columns) if node.features_to_use_next else [f for f in self.features_to_consider if f not in self._get_matching_features(node.ignore_after, node_X.columns)]
-                subtree = DecisionTreeClassifier(**self.Tree_kwargs)
-                subtree.fit(node_X[features_to_use], node_y)
+        def build_subtree(node: RuleNode, node_X: pd.DataFrame, node_y: np.ndarray, depth: int = 0):
+            if len(node_X) == 0 or len(node_y) == 0:
+                logger.warning("No samples left for subtree. Making a leaf node.")
+                node.feature = None
+                node.condition = None
+                node.class_counts = np.zeros(self.n_classes_).tolist()
+                node.children = []
+                node.is_custom = False
+                return
 
-                # Replace the leaf with the subtree
-                if subtree.tree_.feature[0] != -2:  # -2 indicates a leaf in scikit-learn's implementation
-                    node.feature = features_to_use[subtree.tree_.feature[0]]
-                    node.condition = 'less_than_or_equal'
-                    node.value = subtree.tree_.threshold[0]
-                    node.children = [
-                        RuleNode(name="left_leaf", feature=None, condition=None, value=subtree.tree_.value[subtree.tree_.children_left[0]][0].tolist()),
-                        RuleNode(name="right_leaf", feature=None, condition=None, value=subtree.tree_.value[subtree.tree_.children_right[0]][0].tolist())
-                    ]
-
-                    left_mask = node_X[node.feature] <= node.value
-                    build_subtree(node.children[0], node_X[left_mask], node_y[left_mask])
-                    build_subtree(node.children[1], node_X[~left_mask], node_y[~left_mask])
+            # Determine which features to use for subsequent splits
+            if node.features_to_use_next is None or len(node.features_to_use_next) == 0:
+                features_for_splits = [f for f in self.features_to_consider if
+                                       f not in self._get_matching_features(node.ignore_after, node_X.columns)]
             else:
-                # This is an internal node, process its children
-                for child in node.children:
-                    if node.condition == 'less_than' or node.condition == 'less_than_or_equal':
-                        mask = node_X[node.feature] <= node.value
-                    else:
-                        mask = node_X[node.feature] > node.value
-                    build_subtree(child, node_X[mask], node_y[mask])
+                features_for_splits = self._get_matching_features(node.features_to_use_next, node_X.columns)
+
+            if not features_for_splits:
+                logger.warning("No features available for splitting. Making a leaf node.")
+                node.class_counts = np.bincount(node_y, minlength=self.n_classes_).tolist()
+                node.is_custom = False
+                return
+
+            if node.feature is None:
+                # This is a leaf node in the custom tree, continue with DecisionTreeClassifier
+                subtree = DecisionTreeClassifier(**self.Tree_kwargs)
+                subtree.fit(node_X[features_for_splits], node_y)
+
+                if subtree.tree_.feature[0] != -2:  # -2 indicates a leaf in scikit-learn's implementation
+                    node.feature = features_for_splits[subtree.tree_.feature[0]]
+                    node.condition = 'less_than_or_equal'
+                    node.threshold = subtree.tree_.threshold[0]
+                    node.is_custom = False
+
+                    left_node = RuleNode(name="left_child", feature=None, condition=None,
+                                         class_counts=subtree.tree_.value[subtree.tree_.children_left[0]][0].tolist(),
+                                         ignore_after=node.ignore_after,
+                                         features_to_use_next=node.features_to_use_next,
+                                         is_custom=False,
+                                         samples=subtree.tree_.n_node_samples[subtree.tree_.children_left[0]])
+                    right_node = RuleNode(name="right_child", feature=None, condition=None,
+                                          class_counts=subtree.tree_.value[subtree.tree_.children_right[0]][0].tolist(),
+                                          ignore_after=node.ignore_after,
+                                          features_to_use_next=node.features_to_use_next,
+                                          is_custom=False,
+                                          samples=subtree.tree_.n_node_samples[subtree.tree_.children_right[0]])
+
+                    node.add_child(left_node)
+                    node.add_child(right_node)
+
+                    left_mask = node_X[node.feature] <= node.threshold
+                    build_subtree(node.children[0], node_X[left_mask], node_y[left_mask.values], depth + 1)
+                    build_subtree(node.children[1], node_X[~left_mask], node_y[~left_mask.values], depth + 1)
+                else:
+                    # If the subtree is just a leaf, update the current node
+                    node.class_counts = subtree.tree_.value[0][0].tolist()
+                    node.is_custom = False
+            else:
+                # This is an internal node from the custom rules, process its children
+                if node.condition in ['less_than', 'less_than_or_equal']:
+                    mask = node_X[node.feature] <= node.threshold
+                else:
+                    mask = node_X[node.feature] > node.threshold
+
+                # If children don't exist, create them
+                if not node.children:
+                    left_child = RuleNode(name="left_child", feature=None, condition=None,
+                                          class_counts=np.bincount(node_y[mask], minlength=self.n_classes_).tolist(),
+                                          ignore_after=node.ignore_after,
+                                          features_to_use_next=node.features_to_use_next,
+                                          is_custom=node.is_custom,
+                                          samples=np.sum(mask))
+                    right_child = RuleNode(name="right_child", feature=None, condition=None,
+                                           class_counts=np.bincount(node_y[~mask], minlength=self.n_classes_).tolist(),
+                                           ignore_after=node.ignore_after,
+                                           features_to_use_next=node.features_to_use_next,
+                                           is_custom=node.is_custom,
+                                           samples=np.sum(~mask))
+                    node.add_child(left_child)
+                    node.add_child(right_child)
+
+                # Continue building subtrees for both children
+                build_subtree(node.children[0], node_X[mask], node_y[mask], depth + 1)
+                build_subtree(node.children[1], node_X[~mask], node_y[~mask], depth + 1)
 
         # Start building subtrees from the root
         build_subtree(self.tree_, X, y)
 
     def _prune_tree(self, node: RuleNode):
-        if node.feature is None:  # Leaf node
-            return
+        if node is None or not node.children:
+            # This is a leaf node or an empty node, nothing to prune
+            return False
 
         # Recursively prune children
-        for child in node.children:
-            self._prune_tree(child)
+        pruned_children = [self._prune_tree(child) for child in node.children]
 
-        # Check if this node should be pruned
+        # If all children are leaves (after potential pruning), consider pruning this node
         if all(child.feature is None for child in node.children):
-            left_prob = np.max(node.children[0].value) / np.sum(node.children[0].value)
-            right_prob = np.max(node.children[1].value) / np.sum(node.children[1].value)
+            node_proba = max(node.probas) if hasattr(node, 'probas') else 0
 
-            if left_prob >= self.prune_threshold and right_prob >= self.prune_threshold:
+            if node_proba >= self.prune_threshold:
                 # Prune this node (make it a leaf)
+                print(f"Pruning node with feature: {node.feature}, condition: {node.condition}, value: {node.value}")
                 node.feature = None
                 node.condition = None
-                node.value = [sum(x) for x in zip(node.children[0].value, node.children[1].value)]
+                # We keep the node's existing 'value', 'probas', and 'coverage' as they are already correct
                 node.children = []
+                return True  # Indicate that pruning occurred
 
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        # Remove pruned children
+        node.children = [child for child, pruned in zip(node.children, pruned_children) if not pruned]
+
+        return False  # Indicate that no pruning occurred at this node
+
+    def prune_tree(self):
+        def prune_recursive(node):
+            if node is None:
+                return 0
+
+            pruned_count = sum(prune_recursive(child) for child in node.children)
+
+            if self._prune_tree(node):
+                pruned_count += 1
+
+            return pruned_count
+
+        total_pruned = prune_recursive(self.tree_)
+        print(f"Total nodes pruned: {total_pruned}")
+
+    def print_tree_structure(self, node=None, depth=0):
+        if node is None:
+            node = self.tree_
+
+        indent = "  " * depth
+        if node.feature is None:
+            print(f"{indent}Leaf: value={node.value}, probas={node.probas}, coverage={node.coverage}")
+        else:
+            print(f"{indent}{node.feature} {node.condition} {node.value}")
+            print(f"{indent}probas={node.probas}, coverage={node.coverage}")
+            for child in node.children:
+                self.print_tree_structure(child, depth + 1)
+
+    def predict(self, X):
+        check_is_fitted(self)
+        # Convert to DataFrame if it's a numpy array
+        if isinstance(X, np.ndarray):
+            X = pd.DataFrame(X, columns=self.feature_names_)
+        else:
+            X = check_array(X, force_all_finite='allow-nan', ensure_2d=True, dtype=None)
+            X = pd.DataFrame(X, columns=self.feature_names_)
+        return self._predict(X)
+
+    def _predict(self, X: pd.DataFrame) -> np.ndarray:
         if self.tree_ is None:
             raise NotFittedError("This CustomDecisionTree instance is not fitted yet")
 
         def predict_sample(node: RuleNode, sample: pd.Series) -> int:
             if node.feature is None:
-                return np.argmax(node.value)
-            if node.condition in ['less_than', 'less_than_or_equal']:
-                go_left = sample[node.feature] <= node.value
+                return np.argmax(node.class_counts)
+            if node.condition == 'less_than':
+                go_left = sample[node.feature] < node.threshold
+            elif node.condition == 'less_than_or_equal':
+                go_left = sample[node.feature] <= node.threshold
+            elif node.condition == 'greater_than':
+                go_left = sample[node.feature] > node.threshold
+            elif node.condition == 'greater_than_or_equal':
+                go_left = sample[node.feature] >= node.threshold
             else:
-                go_left = sample[node.feature] > node.value
+                raise ValueError(f"Unknown condition: {node.condition}")
             return predict_sample(node.children[0] if go_left else node.children[1], sample)
 
         return np.array([predict_sample(self.tree_, sample) for _, sample in X.iterrows()])
 
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        if self.tree_ is None:
-            raise NotFittedError("This CustomDecisionTree instance is not fitted yet")
+    def predict_proba(self, X):
+        check_is_fitted(self)
+        # Convert to DataFrame if it's a numpy array
+        if isinstance(X, np.ndarray):
+            X = pd.DataFrame(X, columns=self.feature_names_)
+        else:
+            X = check_array(X, force_all_finite='allow-nan', ensure_2d=True, dtype=None)
+            X = pd.DataFrame(X, columns=self.feature_names_)
+        return self._predict_proba(X)
 
+    def _predict_proba(self, X: pd.DataFrame):
         def predict_proba_sample(node: RuleNode, sample: pd.Series) -> np.ndarray:
             if node.feature is None:
-                return np.array(node.value) / np.sum(node.value)
-            if node.condition in ['less_than', 'less_than_or_equal']:
-                go_left = sample[node.feature] <= node.value
+                # This is a leaf node
+                proba = np.array(node.class_counts)
+                if proba.sum() == 0:
+                    # If the node value is all zeros, return uniform distribution
+                    return np.ones(self.n_classes_) / self.n_classes_
+                return proba / proba.sum()
+
+            if node.condition == 'less_than':
+                go_left = sample[node.feature] < node.threshold
+            elif node.condition == 'less_than_or_equal':
+                go_left = sample[node.feature] <= node.threshold
+            elif node.condition == 'greater_than':
+                go_left = sample[node.feature] > node.threshold
+            elif node.condition == 'greater_than_or_equal':
+                go_left = sample[node.feature] >= node.threshold
             else:
-                go_left = sample[node.feature] > node.value
-            return predict_proba_sample(node.children[0] if go_left else node.children[1], sample)
+                raise ValueError(f"Unknown condition: {node.condition}")
 
-        return np.array([predict_proba_sample(self.tree_, sample) for _, sample in X.iterrows()])
+            if go_left:
+                return predict_proba_sample(node.children[0], sample)
+            else:
+                return predict_proba_sample(node.children[1], sample)
 
+        probas = []
+        for _, sample in X.iterrows():
+            proba = predict_proba_sample(self.tree_, sample)
+            if len(proba) != self.n_classes_:
+                # If the probability array doesn't match the number of classes,
+                # pad it with zeros or truncate it
+                proba = np.pad(proba, (0, max(0, self.n_classes_ - len(proba))), mode='constant')
+                proba = proba[:self.n_classes_]
+                proba /= proba.sum()  # Renormalize
+            probas.append(proba)
+
+        return np.array(probas)
     def score(self, X: pd.DataFrame, y: np.ndarray) -> float:
         return np.mean(self.predict(X) == y)
 
-    def enrich_custom_tree(self, X: pd.DataFrame, y: np.ndarray) -> Dict[str, Any]:
-        if self.custom_rules is None:
+    def enrich_custom_tree(self, X: pd.DataFrame, y: np.ndarray) -> RuleNode:
+        if self.tree_ is None:
             return None
 
-        enriched_rules = self._deep_copy_rules(self.custom_rules)
         unique_classes = np.unique(y)
         total_samples = len(y)
         class_counts = np.bincount(y)
 
-        def enrich_node(node: Dict[str, Any], parent_mask: np.ndarray) -> np.ndarray:
-            feature = node['feature']
-            condition = node['condition']
-            value = node['value']
+        def enrich_node(node: RuleNode, node_X: pd.DataFrame, node_y: np.ndarray) -> None:
+            node.samples = len(node_y)
+            node.class_counts = np.bincount(node_y, minlength=len(unique_classes)).tolist()
+            node.probas = (np.array(node.class_counts) / node.samples).tolist() if node.samples > 0 else np.zeros_like(
+                node.class_counts, dtype=float).tolist()
+            node.coverage = (np.array(node.class_counts) / class_counts).tolist()
 
-            if condition == 'less_than':
-                mask = X[feature] < value
-            elif condition == 'less_than_or_equal':
-                mask = X[feature] <= value
-            elif condition == 'greater_than':
-                mask = X[feature] > value
-            elif condition == 'greater_than_or_equal':
-                mask = X[feature] >= value
-            else:
-                raise ValueError(f"Unknown condition: {condition}")
+            if node.feature is not None:
+                if node.condition == 'less_than':
+                    mask = node_X[node.feature] < node.threshold
+                elif node.condition == 'less_than_or_equal':
+                    mask = node_X[node.feature] <= node.threshold
+                elif node.condition == 'greater_than':
+                    mask = node_X[node.feature] > node.threshold
+                elif node.condition == 'greater_than_or_equal':
+                    mask = node_X[node.feature] >= node.threshold
+                else:
+                    raise ValueError(f"Unknown condition: {node.condition}")
 
-            if 'pre_condition_value' in node:
-                mask = mask if node['pre_condition_value'] else ~mask
+                enrich_node(node.children[0], node_X[mask], node_y[mask])
+                enrich_node(node.children[1], node_X[~mask], node_y[~mask])
 
-            mask &= parent_mask
-
-            node_y = y[mask]
-            node_counts = np.bincount(node_y, minlength=len(unique_classes))
-            node_probas = node_counts / len(node_y) if len(node_y) > 0 else np.zeros_like(node_counts, dtype=float)
-            node_coverage = node_counts / class_counts
-
-            node['probas'] = node_probas.tolist()
-            node['coverage'] = node_coverage.tolist()
-
-            for child in node.get('children', []):
-                enrich_node(child, mask)
-
-            return mask
-
-        enrich_node(enriched_rules, np.ones(X.shape[0], dtype=bool))
-        return enriched_rules
+        enrich_node(self.tree_, X, y)
+        return self.tree_
 
     def _deep_copy_rules(self, rules: Dict[str, Any]) -> Dict[str, Any]:
         import copy
@@ -401,72 +691,38 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
             raise NotFittedError("The CustomDecisionTree has not been fitted yet. Call 'fit' before using this method.")
         return self.enriched_rules
 
-    def get_custom_rules_model(self, X: pd.DataFrame, y: np.ndarray) -> Dict[str, Any]:
+    def get_custom_rules_model(self) -> Dict[str, Any]:
         if self.tree_ is None:
             raise NotFittedError("The CustomDecisionTree has not been fitted yet.")
 
-        def numpy_to_python(obj: Any) -> Union[int, float, list, Dict[str, Any]]:
-            if isinstance(obj, np.integer):
-                return int(obj)
-            elif isinstance(obj, np.floating):
-                return float(obj)
-            elif isinstance(obj, np.ndarray):
-                return [numpy_to_python(item) for item in obj]
-            elif isinstance(obj, dict):
-                return {key: numpy_to_python(value) for key, value in obj.items()}
-            elif isinstance(obj, list):
-                return [numpy_to_python(item) for item in obj]
-            else:
-                return obj
+        def node_to_dict(node: RuleNode) -> Dict[str, Any]:
+            node_dict = {
+                "name": node.name,
+                "feature": node.feature,
+                "condition": node.condition,
+                "threshold": node.threshold,
+                "class_counts": node.class_counts,
+                "samples": node.samples,
+                "probas": node.probas,
+                "coverage": node.coverage,
+                "is_custom": node.is_custom,
+                "ignore_after": node.ignore_after,
+                "features_to_use_next": node.features_to_use_next
+            }
 
-        def extract_node(node: RuleNode, node_X: pd.DataFrame, node_y: np.ndarray) -> Tuple[Dict[str, Any], np.ndarray]:
-            if node.feature is None:
-                node_mask = np.ones(len(node_y), dtype=bool)
-                node_counts = np.bincount(node_y, minlength=self.n_classes_)
-                node_probas = node_counts / len(node_y) if len(node_y) > 0 else np.zeros_like(node_counts, dtype=float)
-                node_coverage = node_counts / np.bincount(y, minlength=self.n_classes_)
+            if node.feature is not None:
+                node_dict["children"] = [node_to_dict(child) for child in node.children]
 
-                return {
-                    "name": "leaf",
-                    "value": numpy_to_python(node.value.tolist() if node.value is not None else None),
-                    "samples": numpy_to_python(np.sum(node.value) if node.value is not None else 0),
-                    "probas": numpy_to_python(node_probas.tolist()),
-                    "coverage": numpy_to_python(node_coverage.tolist())
-                }, node_mask
-            else:
-                if node.condition == 'less_than':
-                    node_mask = node_X.iloc[:, node.feature] < node.threshold
-                elif node.condition == 'less_than_or_equal':
-                    node_mask = node_X.iloc[:, node.feature] <= node.threshold
-                elif node.condition == 'higher_than':
-                    node_mask = node_X.iloc[:, node.feature] > node.threshold
-                elif node.condition == 'higher_than_or_equal':
-                    node_mask = node_X.iloc[:, node.feature] >= node.threshold
-                else:
-                    raise ValueError(f"Unknown condition: {node.condition}")
+            return node_dict
 
-                left_X, left_y = node_X[node_mask], node_y[node_mask]
-                right_X, right_y = node_X[~node_mask], node_y[~node_mask]
+        custom_rules_model = {
+            "root": node_to_dict(self.tree_),
+            "feature_names": self.feature_names_,
+            "n_classes": self.n_classes_,
+            "classes": self.classes_.tolist()
+        }
 
-                left_result, left_mask = extract_node(node.left, left_X, left_y)
-                right_result, right_mask = extract_node(node.right, right_X, right_y)
-
-                node_counts = np.bincount(node_y, minlength=self.n_classes_)
-                node_probas = node_counts / len(node_y) if len(node_y) > 0 else np.zeros_like(node_counts, dtype=float)
-                node_coverage = node_counts / np.bincount(y, minlength=self.n_classes_)
-
-                result = {
-                    "name": f"node-{self.feature_names_[node.feature]}",
-                    "feature": self.feature_names_[node.feature],
-                    "condition": node.condition,  # Use the node's condition
-                    "value": numpy_to_python(node.threshold),
-                    "samples": numpy_to_python(len(node_y)),
-                    "probas": numpy_to_python(node_probas.tolist()),
-                    "coverage": numpy_to_python(node_coverage.tolist()),
-                    "children": [left_result, right_result]
-                }
-
-                return result, node_mask
+        return custom_rules_model
 
     def generate_metrics(self, X: pd.DataFrame = None,
                          y: np.ndarray = None,
@@ -669,31 +925,6 @@ if __name__ == "__main__":
         processed_rules = rules_loader.get_processed_rules()
 
         # Create and train the custom decision tree
-        print("CustomDecisionTreeV1")
-        print(30 * "+")
-        clf = CustomDecisionTreeV1(custom_rules=processed_rules, criterion='gini', max_depth=5, random_state=42,
-                                 prune_threshold=0.95)
-        clf.fit(X_train, y_train)
-
-        # Make predictions
-        y_pred = clf.predict(X_test)
-
-        # Calculate accuracy
-        accuracy = accuracy_score(y_test, y_pred)
-        print(f"Model accuracy: {accuracy:.4f}")
-
-        # Get and print enriched rules
-        enriched_rules = clf.get_enriched_rules()
-        print("\nEnriched Rules:")
-        print(json.dumps(enriched_rules, indent=2))
-
-        with open("temp_rules_enriched_v1.json", "w") as f:
-            json.dump(enriched_rules, f)
-
-        print(30*"+")
-        print("CustomDecisionTreeV2")
-        print(30 * "+")
-
         clf = CustomDecisionTreeV2(custom_rules=processed_rules, criterion='gini', max_depth=5, random_state=42)
         clf.fit(X_train, y_train)
 

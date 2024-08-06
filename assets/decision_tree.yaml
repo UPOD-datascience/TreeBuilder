@@ -1,8 +1,8 @@
 criterion: gini
 splitter: best
-max_depth: 10
-min_samples_split: 10
-min_samples_leaf: 5
+max_depth: 4
+min_samples_split: 20
+min_samples_leaf: 10
 min_weight_fraction_leaf: 0.05
 max_features: None
 random_state: 7
