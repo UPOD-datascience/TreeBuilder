@@ -46,8 +46,17 @@
             border: 0px;
             border-radius: 8px;
             pointer-events: none;
+            width: 350px;
         }
-        #fit-button, #unfold-all-button {
+        .tooltip-row {
+          display: flex;
+          justify-content: space-between;
+          margin-bottom: 5px;
+        }
+        .tooltip-label {
+          margin-right: 10px;
+        }
+        #fit-button, #unfold-all-button, #collapse-button {
             position: absolute;
             top: 10px;
             z-index: 1000;
@@ -58,11 +67,16 @@
         #unfold-all-button {
             left: 120px;
         }
+        #collapse-button {
+            left: 220px;
+        }
     </style>
 </head>
 <body>
     <button id="fit-button">Fit to Screen</button>
     <button id="unfold-all-button">Unfold All</button>
+    <button id="collapse-button">Collapse Nodes</button>
+
     <div id="explainer"><== True | False ==></div>
     <div id="tree-container"></div>
 
@@ -75,6 +89,40 @@
         const width = window.innerWidth - margin.left - margin.right;
         const height = window.innerHeight - margin.top - margin.bottom;
 
+        const conditionSymbols = {
+            "less_than": "<",
+            "less_than_or_equal": "≤",
+            "greater_than": ">",
+            "greater_than_or_equal": "≥"
+        };
+        function collapseNodes(d, minSamples) {
+            if (d.children) {
+                if (d.data.samples < minSamples) {
+                    d._children = d.children;
+                    d.children = null;
+                } else {
+                    d.children.forEach(child => collapseNodes(child, minSamples));
+                }
+            }
+        }
+
+        // Add this function to handle the collapse button click
+        function handleCollapse() {
+            const minSamples = parseInt(prompt("Enter minimum number of samples:", "100"));
+            if (isNaN(minSamples)) return;
+
+            collapseNodes(root, minSamples);
+            update(root);
+            fitToScreen();
+        }
+
+        // Add event listener to the collapse button
+        d3.select("#collapse-button").on("click", handleCollapse);
+
+        // Helper function to get the symbol for a condition
+        function getConditionSymbol(condition) {
+            return conditionSymbols[condition] || condition;
+        }
         // Create the SVG container
         const svg = d3.select("#tree-container")
             .append("svg")
@@ -98,20 +146,49 @@
             .attr("class", "tooltip")
             .style("opacity", 0);
 
+        function getMaxProba(d) {
+            return Math.max(...d.data.probas);
+        }
+
+        function getProbaIncrease(d) {
+            if (!d.parent) return 0;
+            return getMaxProba(d) - getMaxProba(d.parent);
+        }
+
         // Create a tree layout
         const tree = d3.tree().size([width, height]);
 
         // Create the root node
         const root = d3.hierarchy(treeData.root);
 
-        // Function to recursively process the tree and set is_custom
+        // Calculate the maximum number of samples for scaling
+        const maxSamples = d3.max(root.descendants(), d => d.data.samples);
 
+        function getMaxProba(d) {
+            return Math.max(...d.data.probas);
+        }
+        // Calculate the maximum probability in the entire tree
+        const rootMaxProba = getMaxProba(root);
+
+        // Create a scale for node radius
+        const radiusScale = d3.scaleSqrt()
+            .domain([0, maxSamples])
+            .range([3, 20]);
+
+        // Create a scale for link thickness
+        const linkScale = d3.scaleLinear()
+            .domain([0, rootMaxProba])
+            .range([1, 15]);
+
+        // Function to recursively process the tree and set is_custom
         let nodeId = 0;
         root.eachBefore(d => {
             d.id = nodeId++;
             d.x0 = width / 2;
             d.y0 = 0;
         });
+
+
 
         // Collapse the node and all its children
         function collapse(d) {
@@ -159,53 +236,77 @@
             const nodeEnter = node.enter().append('g')
                 .attr('class', 'node')
                 .attr("transform", d => `translate(${source.x0},${source.y0})`)
-                .on('click', click);
+                .on('click', (event, d) => {
+                    if (d.children) {
+                        d._children = d.children;
+                        d.children = null;
+                    } else {
+                        d.children = d._children;
+                        d._children = null;
+                    }
+                    update(d);
+                });
 
             nodeEnter.append('circle')
                 .attr('r', 1e-6)
                 .style("fill", d => d.data.is_custom ? "green" : "red")  // Color based on is_custom
                 .style("stroke", d => d._children ? "lightsteelblue" : "#fff")
                 .on("mouseover", function(event, d) {
-                    tooltip.transition().duration(200).style("opacity", .9);
-                    tooltip.html(`
-                        Feature: ${d.data.feature || "Leaf"}<br/>
-                        Samples: ${d.data.samples}<br/>
-                        Probas: ${d.data.probas.map(p => p.toFixed(2)).join(", ")}<br/>
-                        Coverage: ${d.data.coverage.map(c => c.toFixed(2)).join(", ")}<br/>
-                        Custom: ${d.data.is_custom ? "Yes" : "No"}
-                    `)
-                    .style("left", (event.pageX + 10) + "px")
-                    .style("top", (event.pageY - 28) + "px");
-                })
-                .on("mouseout", () => tooltip.transition().duration(300).style("opacity", 0));
+                let tooltipContent = '';
+
+                if (d.data.feature) {
+                    const symbol = getConditionSymbol(d.data.condition);
+                    tooltipContent += `<div class="tooltip-row"><span>Feature:</span><span><b>${d.data.feature}</b></span></div>`;
+                    tooltipContent += `<div class="tooltip-row"><span>Condition:</span><span><b>${symbol}</b></span></div>`;
+                    tooltipContent += `<div class="tooltip-row"><span>Threshold:</span><span><b>${d.data.threshold.toFixed(2)}</b></span></div>`;
+                } else {
+                    tooltipContent += `<div class="tooltip-row"><span>Node Type:</span><span>Leaf</span></div>`;
+                }
+
+                tooltipContent += `<div class="tooltip-row"><span>Samples:</span><span><b>${d.data.samples}</b></span></div>`;
+                tooltipContent += `<div class="tooltip-row"><span>Probas:</span><span><b>${d.data.probas.map(p => (p * 100).toFixed(2) + '%').join(', ')}</b></span></div>`;
+                tooltipContent += `<div class="tooltip-row"><span>Coverage:</span><span><b>${d.data.coverage.map(c => (c * 100).toFixed(2) + '%').join(', ')}</b></span></div>`;
+                tooltipContent += `<div class="tooltip-row"><span>Custom:</span><span><b>${d.data.is_custom ? "Yes" : "No"}</b></span></div>`;
+
+                tooltip.transition().duration(200).style("opacity", .9);
+                tooltip.html(tooltipContent)
+                  .style("left", (event.pageX + 10) + "px")
+                  .style("top", (event.pageY - 28) + "px");
+            })
+            .on("mouseout", () => tooltip.transition().duration(300).style("opacity", 0));
 
             nodeEnter.append('text')
             .attr("dy", ".35em")
+            .attr("font-weight", 700)
             .attr("x", d => d.children || d._children ? -13 : 13)
             .attr("text-anchor", d => d.children || d._children ? "end" : "start")
             .text(d => {
                 if (d.data.feature) {
-                    return `${d.data.feature} ${d.data.condition} ${d.data.threshold.toFixed(2)}`;
+                    const symbol = getConditionSymbol(d.data.condition);
+                    return `${d.data.feature} ${symbol} ${d.data.threshold.toFixed(2)}`;
                 } else {
-                    return `Leaf (${d.data.samples})`;
+                    return `${d.data.samples}`;
                 }
-            })
-            .attr("transform", "rotate(-30)");
+            }).attr("transform", "rotate(-20)");
 
             const nodeUpdate = nodeEnter.merge(node);
 
             nodeEnter.on("mouseover", (event, d) => {
                 let tooltipContent = d.data.feature
-                    ? `Feature: ${d.data.feature}<br>Condition: ${d.data.condition}<br>Threshold: ${d.data.threshold.toFixed(2)}`
+                    ? `<div class="tooltip-row"><span>Feature:</span><span><b>${d.data.feature}</b></span></div>
+<br><div class="tooltip-row"><span>Condition:</span><span><b>${d.data.condition}</b></span></div>
+<br><div class="tooltip-row"><span>Threshold:</span><span><b>${d.data.threshold.toFixed(2)}</b></span></div>`
                     : `Leaf Node`;
-                tooltipContent += `<br>Samples: ${d.data.samples}`;
-                tooltipContent += `<br>Class Distribution: ${d.data.probas.map(p => (p * 100).toFixed(2) + '%').join(', ')}`;
+
+                tooltipContent += `<br><div class="tooltip-row"><span>Samples:</span><span><b>${d.data.samples} (${Math.round(100*d.data.samples/maxSamples,2)}%)</b></span></div>`;
+                tooltipContent += `<br><div class="tooltip-row"><span>Class Distribution:</span><span><b>${d.data.probas.map(p => (p * 100).toFixed(2) + '%').join(', ')}</b></span></div>`;
+                tooltipContent += `<br><div class="tooltip-row"><span>Coverage:</span><span><b>${d.data.coverage.map(p => (p * 100).toFixed(2) + '%').join(', ')}</b></span></div>`;
 
                 tooltip.transition()
                     .duration(200)
                     .style("opacity", .9);
                 tooltip.html(tooltipContent)
-                    .style("left", (event.pageX) + "px")
+                    .style("left", (event.pageX + 28) + "px")
                     .style("top", (event.pageY - 28) + "px");
             })
             .on("mouseout", d => {
@@ -219,7 +320,7 @@
                 .attr("transform", d => `translate(${d.x},${d.y})`);
 
             nodeUpdate.select('circle')
-                .attr('r', 5)
+                .attr('r', d => radiusScale(d.data.samples))
                 .style("fill", d => d.data.is_custom ? "green" : "red")  // Color based on is_custom
                 .style("stroke", d => d._children ? "lightsteelblue" : "#fff")
                 .attr('cursor', 'pointer');
@@ -240,18 +341,22 @@
             const link = g.selectAll('path.link')
                 .data(links, d => d.id);
 
+
             const linkEnter = link.enter().insert('path', "g")
                 .attr("class", "link")
                 .attr('d', d => {
                     const o = {x: source.x0, y: source.y0};
                     return diagonal(o, o);
-                });
+                })
+                .style("stroke-width", d => linkScale(getProbaIncrease(d)));
 
             const linkUpdate = linkEnter.merge(link);
 
+
             linkUpdate.transition()
                 .duration(750)
-                .attr('d', d => diagonal(d, d.parent));
+                .attr('d', d => diagonal(d, d.parent))
+                .style("stroke-width", d => linkScale(getProbaIncrease(d)));
 
             link.exit().transition()
                 .duration(750)

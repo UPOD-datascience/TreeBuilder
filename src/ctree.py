@@ -527,7 +527,7 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
 
             if node_proba >= self.prune_threshold:
                 # Prune this node (make it a leaf)
-                print(f"Pruning node with feature: {node.feature}, condition: {node.condition}, value: {node.value}")
+                print(f"Pruning node with feature: {node.feature}, condition: {node.condition}, value: {node.threshold}")
                 node.feature = None
                 node.condition = None
                 # We keep the node's existing 'value', 'probas', and 'coverage' as they are already correct
