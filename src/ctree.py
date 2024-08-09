@@ -22,10 +22,7 @@ import dotenv
 #TODO nice: add feature recombinator
 #TODO nice: option for a GradientBoostedClassifier followed by RuleFit
 
-#[x] TODO must: add higher_than_or_equal_to
-#TODO must: if root is empty, then create a decisiontree directly
-#TODO must: add YAML file with model settings
-#TODO must: add pickle function
+#TODO must: add pickle function or ONNX; https://onnx.ai/sklearn-onnx/supported.html,
 #TODO must: add error handling in main functions
 import logging
 
@@ -162,11 +159,13 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
     def __init__(self,
                  custom_rules: Union[Dict[str, Any], RuleNode] = None,
                  criterion: str='gini', 
+                 tot_max_depth: int = None,
                  max_depth: int = None,
                  min_samples_split: int = 2,
                  min_samples_leaf: int = 1,
                  random_state: int=None,
                  prune_threshold: float=0.9,
+                 TargetMap: Dict[int,str]=None,
                  Tree_kwargs: Dict[str, Any] = None):
         '''
         Custom decision tree builder v2; this applies the custom tree first and then continues
@@ -176,6 +175,9 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
         :param criterion: the decision tree criterion
         :param max_depth: maximum depth of the decision tree
         :param random_state: the seed
+
+        # TODO: make sure that the total_max_depth is respected, probably problem with recursive tree generation
+        # --> during tree generation, keep track of total depth, should <tot_max_depth
         '''
         super().__init__()
         self.custom_rules = custom_rules
@@ -189,9 +191,11 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
         
         self.criterion = criterion
         self.max_depth = max_depth
+        self.tot_max_depth = tot_max_depth
         self.min_samples_split = min_samples_split
         self.min_samples_leaf = min_samples_leaf
         self.random_state = random_state
+        self.TargetMap = TargetMap
         
         self.Tree_kwargs = Tree_kwargs or {}
         if Tree_kwargs is {}:
@@ -426,7 +430,7 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
 
     def _continue_tree_building(self, X: pd.DataFrame, y: np.ndarray):
         def build_subtree(node: RuleNode, node_X: pd.DataFrame, node_y: np.ndarray, depth: int = 0):
-            if len(node_X) == 0 or len(node_y) == 0:
+            if (len(node_X) == 0 or len(node_y) == 0) | (depth > self.tot_max_depth):
                 logger.warning("No samples left for subtree. Making a leaf node.")
                 node.feature = None
                 node.condition = None
@@ -703,6 +707,7 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
                 "threshold": node.threshold,
                 "class_counts": node.class_counts,
                 "samples": node.samples,
+                "targets": list(self.TargetMap.values()),
                 "probas": node.probas,
                 "coverage": node.coverage,
                 "is_custom": node.is_custom,
@@ -829,8 +834,9 @@ def generate_sample_rules():
     }
     return rules
 
-def update_html(html_path: str="./treeTemplate.html",
-                tree: str=None):
+def update_html(html_path: str = "./treeTemplate.html",
+                tree: str = None,
+                output_path: str = '../artifacts/decision_tree_visualization_with_data.html'):
     with open(html_path, 'r') as file:
         html_content = file.read()
 
@@ -839,7 +845,7 @@ def update_html(html_path: str="./treeTemplate.html",
     html_content = html_content.replace('<!-- Your JSON data will be inserted here -->',
                                         f'const treeData = {tree_json};')
 
-    with open('../artifacts/decision_tree_visualization_with_data.html', 'w') as file:
+    with open(output_path, 'w') as file:
         file.write(html_content)
 
 
