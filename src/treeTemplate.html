@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <!-- TODO: add layer indicators-->
+    <!-- TODO: add target names to probas-->
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Rotated Decision Tree Visualization</title>
@@ -46,7 +48,7 @@
             border: 0px;
             border-radius: 8px;
             pointer-events: none;
-            width: 350px;
+            width: 450px;
         }
         .tooltip-row {
           display: flex;
@@ -56,6 +58,32 @@
         .tooltip-label {
           margin-right: 10px;
         }
+        .tooltip-table {
+          width: 100%;
+          display: table;
+          border-collapse: collapse;
+          table-layout: fixed;
+        }
+        .tooltip-table-row {
+          display: table-row;
+        }
+        .tooltip-table-cell {
+          display: table-cell;
+          padding: 5px;
+          border: 1px solid #ddd;
+          text-align: center;
+          vertical-align: middle;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .tooltip-table-row.header {
+          font-weight: bold;
+          background-color: #f2f2f2;
+        }
+
+
         #fit-button, #unfold-all-button, #collapse-button {
             position: absolute;
             top: 10px;
@@ -155,6 +183,11 @@
             return getMaxProba(d) - getMaxProba(d.parent);
         }
 
+        function getMaxProbaIncrease(d) {
+            if (!d.parent) return 0;
+            return Math.max(...d.data.probas.map((p, i) => p - d.parent.data.probas[i]));
+        }
+
         // Create a tree layout
         const tree = d3.tree().size([width, height]);
 
@@ -164,9 +197,6 @@
         // Calculate the maximum number of samples for scaling
         const maxSamples = d3.max(root.descendants(), d => d.data.samples);
 
-        function getMaxProba(d) {
-            return Math.max(...d.data.probas);
-        }
         // Calculate the maximum probability in the entire tree
         const rootMaxProba = getMaxProba(root);
 
@@ -177,8 +207,8 @@
 
         // Create a scale for link thickness
         const linkScale = d3.scaleLinear()
-            .domain([0, rootMaxProba])
-            .range([1, 15]);
+            .domain([0, 1])
+            .range([1, 17]);
 
         // Function to recursively process the tree and set is_custom
         let nodeId = 0;
@@ -299,8 +329,12 @@
                     : `Leaf Node`;
 
                 tooltipContent += `<br><div class="tooltip-row"><span>Samples:</span><span><b>${d.data.samples} (${Math.round(100*d.data.samples/maxSamples,2)}%)</b></span></div>`;
-                tooltipContent += `<br><div class="tooltip-row"><span>Class Distribution:</span><span><b>${d.data.probas.map(p => (p * 100).toFixed(2) + '%').join(', ')}</b></span></div>`;
-                tooltipContent += `<br><div class="tooltip-row"><span>Coverage:</span><span><b>${d.data.coverage.map(p => (p * 100).toFixed(2) + '%').join(', ')}</b></span></div>`;
+
+                tooltipContent += `<br><div class="tooltip-table">`
+                tooltipContent += `<div class="tooltip-table-row"><div class="tooltip-table-cell"><b>Classes</b></div>${d.data.targets.map(p => '<div class="tooltip-table-cell"><b>' + p + '</b></div>').join('')}</div>`;
+                tooltipContent += `<div class="tooltip-table-row"><div class="tooltip-table-cell"><b>Probas</b></div>${d.data.probas.map(p => '<div class="tooltip-table-cell">' +(p * 100).toFixed(2) + '%</div>').join('')}</div>`;
+                tooltipContent += `<div class="tooltip-table-row"><div class="tooltip-table-cell"><b>Coverage</b></div>${d.data.coverage.map(p => '<div class="tooltip-table-cell">' + (p * 100).toFixed(2) + '%</div>').join('')}</div>`;
+                tooltipContent += `</div>`
 
                 tooltip.transition()
                     .duration(200)
@@ -348,7 +382,7 @@
                     const o = {x: source.x0, y: source.y0};
                     return diagonal(o, o);
                 })
-                .style("stroke-width", d => linkScale(getProbaIncrease(d)));
+                .style("stroke-width", d => linkScale(getMaxProbaIncrease(d)));
 
             const linkUpdate = linkEnter.merge(link);
 
@@ -356,7 +390,7 @@
             linkUpdate.transition()
                 .duration(750)
                 .attr('d', d => diagonal(d, d.parent))
-                .style("stroke-width", d => linkScale(getProbaIncrease(d)));
+                .style("stroke-width", d => linkScale(getMaxProbaIncrease(d)));
 
             link.exit().transition()
                 .duration(750)
