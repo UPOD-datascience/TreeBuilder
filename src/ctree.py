@@ -118,14 +118,35 @@ class RuleNode:
         self.children.append(child)
 
 class LoadRules:
-    def __init__(self, rules_file: str):
+    def __init__(self, rules_file: str, name_map: Dict[str, str]=None):
         self.rules = self._load_rules(rules_file)
         self.fold_split_col = self.rules.get("fold_split_col")
         self.target_col = self.rules.get("target_col")
         self.ignore_cols = self.rules.get("ignore_cols", [])
         self.features_to_use = self.rules.get("features_to_use", [])
+
+        if isinstance(name_map, dict):
+            self.name_map = name_map
+            try:
+                self.fold_split_col = name_map[self.fold_split_col]
+                self.target_col = name_map[self.target_col]
+                self.ignore_cols = [name_map[col] for col in self.ignore_cols]
+                self.features_to_use = [name_map[feature] for feature in self.features_to_use]
+            except KeyError:
+                raise KeyError("Name map must contain all columns used in the rules")
+        else:
+            self.name_map = None
+
         self.root = self._process_rules(self.rules["root"])
 
+    def _name_mapper(self, name):
+        if self.name_map is None:
+            return name
+        else:
+            if name is None:
+                return None
+            else:
+                return self.name_map[name]
     def _load_rules(self, rules_file: str) -> Dict[str, Any]:
         with open(rules_file, 'r') as f:
             rules = json.load(f)
@@ -134,12 +155,12 @@ class LoadRules:
     def _process_rules(self, node: Dict[str, Any]) -> RuleNode:
         processed_node = RuleNode(
             name=node["name"],
-            feature=node.get("feature"),
+            feature=self._name_mapper(node.get("feature")),
             condition=node.get("condition"),
             threshold=node.get("value"),  # Use 'value' as threshold for internal nodes
             class_counts=None,  # This will be set during tree building
-            ignore_after=node.get("ignore_after"),
-            features_to_use_next=node.get("features_to_use_next"),
+            ignore_after=[self._name_mapper(c) for c in node.get("ignore_after", [])],
+            features_to_use_next=[self._name_mapper(c) for c in node.get("features_to_use_next", [])],
             is_custom=True
         )
 
@@ -728,6 +749,54 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
         }
 
         return custom_rules_model
+
+    def load_from_sklearn_tree(self, sklearn_tree: DecisionTreeClassifier, X: pd.DataFrame, y: np.ndarray):
+        self.feature_names_ = X.columns.tolist()
+        self.classes_ = np.unique(y)
+        self.n_classes_ = len(self.classes_)
+        total_class_counts = np.bincount(y)
+
+        def build_custom_tree(node_id: int, depth: int = 0) -> RuleNode:
+            tree = sklearn_tree.tree_
+            feature = tree.feature[node_id]
+            threshold = tree.threshold[node_id]
+            n_node_samples = tree.n_node_samples[node_id]
+            value = tree.value[node_id][0] # TODO: this is not the class count
+
+            if tree.feature[node_id] != -2:  # Not a leaf node
+                feature_name = self.feature_names_[feature]
+                custom_node = RuleNode(
+                    name=f"node_{node_id}",
+                    feature=feature_name,
+                    condition='less_than_or_equal',
+                    threshold=threshold,
+                    class_counts=[int(n_node_samples*_v) for _v in value.tolist()],
+                    samples=int(n_node_samples),
+                    is_custom=False
+                )
+
+                left_child = build_custom_tree(tree.children_left[node_id], depth + 1)
+                right_child = build_custom_tree(tree.children_right[node_id], depth + 1)
+
+                custom_node.add_child(left_child)
+                custom_node.add_child(right_child)
+            else:  # Leaf node
+                custom_node = RuleNode(
+                    name=f"leaf_{node_id}",
+                    feature=None,
+                    condition=None,
+                    class_counts=[int(n_node_samples*_v) for _v in value.tolist()],
+                    samples=int(n_node_samples),
+                    is_custom=False
+                )
+            custom_node.probas = (np.array(custom_node.class_counts) / np.sum(custom_node.class_counts)).tolist()
+            custom_node.coverage = (np.array(custom_node.class_counts) / total_class_counts).tolist()
+            return custom_node
+
+        self.tree_ = build_custom_tree(0)
+        self.enriched_rules = self.tree_
+
+        return self
 
     def generate_metrics(self, X: pd.DataFrame = None,
                          y: np.ndarray = None,
