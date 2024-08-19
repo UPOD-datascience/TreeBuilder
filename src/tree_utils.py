@@ -224,10 +224,9 @@ def calibrator(results: pd.DataFrame,
 
         -> return a dictionary with calibration functions (in sklearn format), keyed with the model name
     '''
-
-
-
     pass
+
+
 def net_benefit_curve(y_true, y_pred_proba, thresholds):
     """
     Calculate the net benefit curve for a binary classifier.
@@ -602,3 +601,127 @@ def create_feature_combinations(df: pd.DataFrame,
     result_df = pd.concat([result_df, new_columns_df], axis=1)
 
     return result_df, new_column_names
+
+
+# Calibration Error
+def ECEs(Y_true, Y_pred, nbins=15):
+    # see e.g. guo2017calibration
+    # slightly adapted
+    counts, leftboundary = np.histogram(Y_pred, density=False, bins=nbins)
+    rightboundary = leftboundary[1:]
+
+    totnum = Y_pred.shape[0]
+    pmc = []
+    rmc = []
+    emc = []
+    for k, _count in enumerate(counts):
+        gte_left = Y_pred >= leftboundary[k]
+        if k == len(counts) - 1:
+            st_right = Y_pred <= rightboundary[k]
+        else:
+            st_right = Y_pred < rightboundary[k]
+        indcs = np.argwhere(gte_left & st_right)[:, 0]
+
+        Ypc = Y_pred[indcs]
+        Ytc = Y_true[indcs]
+
+        Ci = np.mean(Ypc)
+        Ai = np.mean(Ytc)  # np.mean((Ypc>0.5).astype(int)==Ytc)
+
+        pmc.append(np.abs(Ai - Ci))
+        rmc.append(_count / totnum * (Ai - Ci) ** 2)
+        emc.append(_count / totnum * np.sqrt(np.abs(Ai - Ci)))
+    ece = sum(emc)
+    mce = max(pmc)
+    rmsce = np.sqrt(sum(rmc))
+    return 1 - ece, 1 - mce, 1 - rmsce
+
+
+def R2C(Y_true, Y_pred, nbins=15, weighted=True):
+    counts, leftboundary = np.histogram(Y_pred, density=False, bins=nbins)
+    rightboundary = leftboundary[1:]
+
+    totnum = len(Y_pred)
+    emc = []
+    tot = []
+    Ytm = np.mean(Y_true)
+    for k, _count in enumerate(counts):
+        gte_left = Y_pred >= leftboundary[k]
+        if k == len(counts) - 1:
+            st_right = Y_pred <= rightboundary[k]
+        else:
+            st_right = Y_pred < rightboundary[k]
+        indcs = np.argwhere(gte_left & st_right)[:, 0]
+
+        Ypc = Y_pred[indcs]
+        Ytc = Y_true[indcs]
+
+        Ci = np.mean(Ypc)
+        Ai = np.mean(Ytc)
+        if weighted:
+            emc.append(_count / totnum * (Ai - Ci) ** 2)
+            tot.append(_count / totnum * (Ai - Ytm) ** 2)
+        else:
+            emc.append((Ai - Ci) ** 2)
+            tot.append((Ai - Ytm) ** 2)
+    ece = np.nansum(emc)
+    tots = np.nansum(tot)
+    return 1 - ece / tots
+
+
+def create_calibration_plots(df: pd.DataFrame = None,
+                             ebins: int = 8,
+                             cbins: int = 15,
+                             write_out: bool = False,
+                             output_path: str = None,
+                             mod_name: dict={
+                                        'LR': 'Logistic Regression',
+                                        'XGB': 'eXtreme Gradient Boosting',
+                                        'customDT': 'Custom Decision Tree',
+                                        'normalDT': 'Normal Decision Tree',
+                                    }):
+    pred_strings = [c for c in df.columns if c.startswith('Y_pred')]
+    Classes = set([s.split("_")[3] for s in pred_strings])
+    Models = set([s.split("_")[2] for s in pred_strings])
+
+    for cl in tqdm.tqdm(Classes):
+        for mod in Models:
+            Yt = df.loc[df.Dataset == 'train', f'Y_true_{cl}']
+            Yp = df.loc[df.Dataset == 'train', f'Y_pred_{mod}_{cl}']
+            cCurveTrain = calibration_curve(Yt, Yp, strategy='quantile', n_bins=cbins)
+
+            ECEtrain, _, _ = ECEs(Yt.values, Yp.values, nbins=ebins)
+            R2Ctrain = R2C(Yt.values, Yp.values, nbins=ebins)
+
+            Yt = df.loc[df.Dataset == 'test', f'Y_true_{cl}']
+            Yp = df.loc[df.Dataset == 'test', f'Y_pred_{mod}_{cl}']
+            cCurveTest = calibration_curve(Yt, Yp, strategy='quantile', n_bins=cbins)
+
+            ECEtest, _, _ = ECEs(Yt.values, Yp.values, nbins=ebins)
+            R2Ctest = R2C(Yt.values, Yp.values, nbins=ebins)
+
+            fig, ax = plt.subplots(ncols=2, figsize=(19, 7))
+            ax[0].scatter(cCurveTrain[0], cCurveTrain[1], s=100, label='Train')
+            ax[0].scatter(cCurveTest[0], cCurveTest[1], s=100, label='Test')
+            ax[0].plot([0, 1], [0, 1], color='black')
+            ax[0].legend()
+            ax[0].set_xlabel('Model probability', size=20)
+            ax[0].set_ylabel('Actual probability', size=20)
+            ax[0].legend(prop={'size': 20})
+
+            df.loc[df.Dataset == 'train', f'Y_pred_{mod}_{cl}'].hist(bins=cbins, histtype='step',
+                                                                     lw=3, density=True, label='Train',
+                                                                     ax=ax[1])
+            df.loc[df.Dataset == 'test', f'Y_pred_{mod}_{cl}'].hist(bins=cbins, histtype='step',
+                                                                    lw=3, density=True, label='Test',
+                                                                    ax=ax[1])
+            ax[1].legend(prop={'size': 20})
+            ax[1].set_xlabel('Model probability', size=20)
+            ax[1].set_ylabel('Density', size=20)
+
+            fig.suptitle(
+                f'{mod_name[mod]} calibration: before re-calibration. ECE train/test: {round(ECEtrain, 2)}, {round(ECEtest, 2)}, R2 train/test: {round(R2Ctrain, 2)}, {round(R2Ctest, 2)}')
+            plt.tight_layout()
+            if write_out:
+                plt.savefig(os.path.join(output_path, f'CustomTree_CalibrationPlot_{cl}_{mod}.svg'), dpi=300)
+                plt.close(fig)
