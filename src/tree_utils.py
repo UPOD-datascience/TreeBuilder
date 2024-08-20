@@ -103,6 +103,7 @@ def net_benefit_curve_plot(results: pd.DataFrame = None,
                            xlim=[0, 0.5],
                            ylim=[-0.1, 0.1],
                            show_plot=False,
+                           file_suffix="",
                            plot_title=""):
     """
     Plot net benefit curves for each target, with separate plots per target.
@@ -146,7 +147,7 @@ def net_benefit_curve_plot(results: pd.DataFrame = None,
 
         plt.xlabel('Threshold')
         plt.ylabel('Net Benefit')
-        plt.title(f'Net Benefit Curves; {plot_title};  {target} ')
+        plt.title(f'Net Benefit Curves. {plot_title}. Target={target} ')
         plt.legend()
         plt.grid(True)
 
@@ -156,9 +157,11 @@ def net_benefit_curve_plot(results: pd.DataFrame = None,
             plt.ylim(ylim)
 
         if output_path:
-            plt.savefig(f"{output_path}/net_benefit_curves_{target}.png", dpi=300)
+            plt.savefig(f"{output_path}/net_benefit_curves_{target}{file_suffix}.svg", dpi=300)
         if ~show_plot:
             plt.close()
+        else:
+            plt.show()
 
 def calibration_curve_plot(results: pd.DataFrame = None,
                            true_col_prefix='Y_test',
@@ -199,7 +202,7 @@ def calibration_curve_plot(results: pd.DataFrame = None,
         plt.plot([0, 1], [0, 1], linestyle='--', label='Perfectly calibrated')
         plt.xlabel('Mean predicted probability')
         plt.ylabel('Fraction of positives')
-        plt.title(f'Calibration Curves; {plot_title}; {target}. Uncalibrated')
+        plt.title(f'Calibration Curves; {plot_title}; {target}.')
         plt.legend()
         plt.grid(True)
 
