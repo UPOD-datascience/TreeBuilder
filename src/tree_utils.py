@@ -5,7 +5,7 @@ import pickle
 import os
 import tqdm
 
-from typing import List, Callable, Dict, Tuple
+from typing import List, Callable, Dict, Tuple, Literal
 
 from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix, roc_curve, auc
 from sklearn.preprocessing import label_binarize
@@ -17,6 +17,11 @@ from sklearn.calibration import calibration_curve
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.utils.validation import check_is_fitted
+from sklearn.calibration import IsotonicRegression, _SigmoidCalibration
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import roc_curve, auc
+from numpy import interp
+
 
 #TODO: add rulefitter
 #TODO: add l1 regularised logistic regression
@@ -101,9 +106,11 @@ def net_benefit_curve_plot(results: pd.DataFrame = None,
                            output_path="",
                            threshold_steps=20,
                            xlim=[0, 0.5],
-                           ylim=[-0.1, 0.1],
+                           ylim=[-0.1, 0.5],
                            show_plot=False,
                            file_suffix="",
+                           calibrated=False,
+                           dataset="test",
                            plot_title=""):
     """
     Plot net benefit curves for each target, with separate plots per target.
@@ -120,22 +127,30 @@ def net_benefit_curve_plot(results: pd.DataFrame = None,
     """
     true_cols = [col for col in results.columns if col.startswith(true_col_prefix)
                  if len(col.split("_"))==3]
-    pred_cols = [col for col in results.columns if col.startswith(pred_col_prefix)]
+    if calibrated:
+        pred_cols = [col for col in results.columns if col.startswith(pred_col_prefix) & col.endswith("_calibrated_mean")]
+    else:
+        pred_cols = [col for col in results.columns if col.startswith(pred_col_prefix)]
 
     for true_col in true_cols:
         target = true_col.split('_')[-1]
-        related_pred_cols = [col for col in pred_cols if col.endswith(f'_{target}')]
+        if calibrated:
+            related_pred_cols = [col for col in pred_cols if (f'_{target}' in col) & ('_calibrated' in col)]
+        else:
+            related_pred_cols = [col for col in pred_cols if col.endswith(f'_{target}')]
 
         plt.figure(figsize=(12, 8))
         first_curve = True
         for pred_col in related_pred_cols:
             model_name = pred_col.split('_')[2]  # Assuming format: Y_pred_modelname_xx
-            y_true = results[true_col]
-            y_pred_proba = results[pred_col]
+            y_true = results.loc[results.Dataset == dataset, true_col]
+            y_pred_proba = results.loc[results.Dataset == dataset, pred_col]
+
+            #print(model_name, y_true.shape, y_pred_proba.shape)
 
             thresholds = np.linspace(0, 1, threshold_steps)
             nb_thresholds, net_benefits, all_positive, all_negative =\
-                net_benefit_curve(y_true, y_pred_proba, thresholds)
+                net_benefit_curve(y_true, y_pred_proba, thresholds[:-1])
 
             plt.plot(nb_thresholds, net_benefits, label=f'{model_name}')
 
@@ -154,6 +169,9 @@ def net_benefit_curve_plot(results: pd.DataFrame = None,
         if xlim is not None:
             plt.xlim(xlim)
         if ylim is not None:
+            max_y = np.max(net_benefits)
+            if max_y > ylim[1]:
+                ylim[1] = max_y
             plt.ylim(ylim)
 
         if output_path:
@@ -211,24 +229,6 @@ def calibration_curve_plot(results: pd.DataFrame = None,
         if ~show_plot:
             plt.close()
 
-def calibrator(results: pd.DataFrame,
-               index_columns: tuple=('train_index', 'test_index'),
-               true_col_prefix='Y_test',
-               pred_col_prefix='Y_pred') -> Dict[str, Callable]:
-    '''
-        Generate calibration functions.
-
-        results: DataFrame with Y_test and Y_pred columns. {true_col_prefix} is post-fixed with _{class_name}
-            {pred_col_prefix} is post-fixed with _{model_name}_{class_name}. Fold: the fold number,
-            Repeat: the repetition number of the cross-validation. Also contains the index_columns
-        index_columns: tuple of column names for train and test indices
-        true_col_prefix (str): Prefix for columns containing true values.
-        pred_col_prefix (str): Prefix for columns containing predictions.
-
-        -> return a dictionary with calibration functions (in sklearn format), keyed with the model name
-    '''
-    pass
-
 
 def net_benefit_curve(y_true, y_pred_proba, thresholds):
     """
@@ -246,7 +246,6 @@ def net_benefit_curve(y_true, y_pred_proba, thresholds):
     net_benefits = []
     prevalence = np.mean(y_true)
     all_positive_benefits = []
-
     for threshold in thresholds:
         y_pred = (y_pred_proba >= threshold).astype(int)
         tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
@@ -499,7 +498,7 @@ def make_plots(results,
             mean_tpr[-1] = 1.0
             mean_auc = auc(mean_fpr, mean_tpr)
             std_tpr = np.std(data['tprs'], axis=0)
-            ci_tpr = stats.norm.ppf(0.975) * std_tpr / np.sqrt(len(data['tprs']))
+            ci_tpr = stats.norm.ppf(0.9) * std_tpr / np.sqrt(len(data['tprs']))
 
             ax.plot(mean_fpr, mean_tpr, color=colors[idx], lw=2,
                     label=f'{mod_name[model]} (mean AUC = {mean_auc:0.2f})')
@@ -682,7 +681,8 @@ def create_calibration_plots(df: pd.DataFrame = None,
                                         'XGB': 'eXtreme Gradient Boosting',
                                         'customDT': 'Custom Decision Tree',
                                         'normalDT': 'Normal Decision Tree',
-                                    }):
+                                    },
+                             suffix=''):
     pred_strings = [c for c in df.columns if c.startswith('Y_pred')]
     Classes = set([s.split("_")[3] for s in pred_strings])
     Models = set([s.split("_")[2] for s in pred_strings])
@@ -697,16 +697,16 @@ def create_calibration_plots(df: pd.DataFrame = None,
             R2Ctrain = R2C(Yt.values, Yp.values, nbins=ebins)
 
             Yt = df.loc[df.Dataset == 'test', f'Y_true_{cl}']
-            Yp = df.loc[df.Dataset == 'test', f'Y_pred_{mod}_{cl}']
+            Yp = df.loc[df.Dataset == 'test', f'Y_pred_{mod}_{cl}{suffix}']
             cCurveTest = calibration_curve(Yt, Yp, strategy='quantile', n_bins=cbins)
 
             ECEtest, _, _ = ECEs(Yt.values, Yp.values, nbins=ebins)
             R2Ctest = R2C(Yt.values, Yp.values, nbins=ebins)
 
             fig, ax = plt.subplots(ncols=2, figsize=(19, 7))
-            ax[0].scatter(cCurveTrain[0], cCurveTrain[1], s=100, label='Train')
-            ax[0].scatter(cCurveTest[0], cCurveTest[1], s=100, label='Test')
-            ax[0].plot([0, 1], [0, 1], color='black')
+            ax[0].plot(cCurveTrain[0], cCurveTrain[1], marker='o', label='Train', lw=2)
+            ax[0].plot(cCurveTest[0], cCurveTest[1], marker='o', label='Test', lw=2)
+            ax[0].plot([0, 1], [0, 1], color='red', style='--', lw=2)
             ax[0].legend()
             ax[0].set_xlabel('Model probability', size=20)
             ax[0].set_ylabel('Actual probability', size=20)
@@ -715,7 +715,7 @@ def create_calibration_plots(df: pd.DataFrame = None,
             df.loc[df.Dataset == 'train', f'Y_pred_{mod}_{cl}'].hist(bins=cbins, histtype='step',
                                                                      lw=3, density=True, label='Train',
                                                                      ax=ax[1])
-            df.loc[df.Dataset == 'test', f'Y_pred_{mod}_{cl}'].hist(bins=cbins, histtype='step',
+            df.loc[df.Dataset == 'test', f'Y_pred_{mod}_{cl}{suffix}'].hist(bins=cbins, histtype='step',
                                                                     lw=3, density=True, label='Test',
                                                                     ax=ax[1])
             ax[1].legend(prop={'size': 20})
@@ -723,8 +723,215 @@ def create_calibration_plots(df: pd.DataFrame = None,
             ax[1].set_ylabel('Density', size=20)
 
             fig.suptitle(
-                f'{mod_name[mod]} calibration: before re-calibration. ECE train/test: {round(ECEtrain, 2)}, {round(ECEtest, 2)}, R2 train/test: {round(R2Ctrain, 2)}, {round(R2Ctest, 2)}')
+                f'{mod_name[mod]} calibration: ECE train/test: {round(ECEtrain, 2)}, {round(ECEtest, 2)}, R2 train/test: {round(R2Ctrain, 2)}, {round(R2Ctest, 2)}')
             plt.tight_layout()
             if write_out:
-                plt.savefig(os.path.join(output_path, f'CustomTree_CalibrationPlot_{cl}_{mod}.svg'), dpi=300)
+                plt.savefig(os.path.join(output_path, f'CustomTree_CalibrationPlot_{cl}_{mod}{suffix}.svg'), dpi=300)
                 plt.close(fig)
+
+
+def calibrater(y_true, y_preds, how: Literal = ['isotonic', 'linear', 'sigmoid']):
+    if how == 'isotonic':
+        calibrator = IsotonicRegression(out_of_bounds='clip')
+    elif how == 'linear':
+        calibrator = LinearRegression(positive=True)
+    elif how == 'sigmoid':
+        calibrator = _SigmoidCalibration()
+    else:
+        raise ValueError("method should be one of isotonic, linear or sigmoid")
+
+    calibrator.fit(y_preds, y_true)
+    return calibrator
+
+def add_calibrated_values(df, how='isotonic'):
+    CALIBRATOR = defaultdict(lambda: defaultdict(list))
+
+    pred_strings = [c for c in df.columns if c.startswith('Y_pred')]
+    Classes = set([s.split("_")[3] for s in pred_strings])
+    Models = set([s.split("_")[2] for s in pred_strings])
+    Folds = df.Fold.unique().tolist()
+    Repeats = df.Repeat.unique().tolist()
+
+    for _class in Classes:
+        for _mod in Models:
+            new_col = f'Y_pred_{_mod}_{_class}_calibrated_mean'
+            new_col_std = f'Y_pred_{_mod}_{_class}_calibrated_std'
+            df[new_col] = np.nan
+            df[new_col_std] = np.nan
+            for _Repeat in Repeats:
+                tmp_calibrator_list = []
+                for _Fold in Folds:
+                    conds = (df.Repeat == _Repeat) & (df.Fold == _Fold) & (df.Dataset == 'test')
+                    Y_true = df.loc[conds, f'Y_true_{_class}'].values
+                    Y_pred = df.loc[conds, f'Y_pred_{_mod}_{_class}'].values
+
+                    Calibration_model = calibrater(Y_true, Y_pred, how=how)
+
+                    tmp_calibrator_list.append(Calibration_model)
+                    CALIBRATOR[_class][_mod].append(Calibration_model)
+                # now we collect the calibrated probas for all folds based on all the calibrations
+                _conds = (df.Repeat == _Repeat) & (df.Dataset == 'test')
+                calibrated_list = []
+                _y_preds = df.loc[_conds, f'Y_pred_{_mod}_{_class}'].values
+                for _Fold, _calibrater in enumerate(tmp_calibrator_list):
+                    calibrated_list.append(_calibrater.predict(_y_preds))
+                df.loc[_conds, new_col] = np.mean(calibrated_list, axis=0)
+                df.loc[_conds, new_col_std] = np.std(calibrated_list, axis=0)
+    return df, CALIBRATOR
+
+
+def make_roc_plots(df,
+                   OutPath: str=None,
+                   FoldColumn: str='Fold',
+                   RepeatColumn: str='Repeat',
+                   DataSetColumn: str='Dataset',
+                   n_thresholds: int=50,
+                   Target: Literal=['Heart Axis', 'Muscle', 'Conduction'],
+                   plot_title: str="",
+                   suffix: str='',
+                   mod_name: dict = {
+                       'LR': 'Logistic Regression',
+                       'XGB': 'eXtreme Gradient Boosting',
+                       'customDT': 'Custom Decision Tree',
+                       'normalDT': 'Normal Decision Tree',
+                   }
+                   ):
+
+    pred_strings = [c for c in df.columns if c.startswith('Y_pred')]
+    Classes = set([s.split("_")[3] for s in pred_strings])
+    Models = set([s.split("_")[2] for s in pred_strings])
+
+    for Class in Classes:
+        plt.figure(figsize=(10, 8))
+        for Model in Models:
+            _OutPath = os.path.join(OutPath, f"ROC_curve_{Class}_{Model}{suffix}.svg")
+            _Title = f"Target: {Target}, Class: {Class}, Model: {Model}"
+            mean_auc, std_auc, roc_curve_data = _make_roc_plot(df,
+                                                       TestColumn=f'Y_true_{Class}',
+                                                       PredColumn=f'Y_pred_{Model}_{Class}{suffix}',
+                                                       FoldColumn=FoldColumn,
+                                                       RepeatColumn=RepeatColumn,
+                                                       DataSetColumn=DataSetColumn,
+                                                       OutPath=_OutPath,
+                                                       n_thresholds=n_thresholds,
+                                                       plot_title=_Title,
+                                                       return_curve=True)
+
+            plt.plot(roc_curve_data[0], roc_curve_data[1],
+                         label=f"{mod_name[Model]}. AUC={round(mean_auc,2)} ± {round(std_auc,2)}", lw=2)
+            line_color = plt.gca().lines[-1].get_color()
+            tprs_lower = np.maximum(roc_curve_data[1] - roc_curve_data[2], 0)
+            tprs_upper = np.minimum(roc_curve_data[1] + roc_curve_data[2], 1)
+            plt.fill_between(roc_curve_data[0], tprs_lower, tprs_upper, color=line_color, alpha=.1)  # label=f'± 1 std. dev.'
+
+        plt.plot([0, 1], [0, 1], linestyle='--', lw=2, color='black', label='Chance', alpha=.8)
+        plt.xlim([-0.05, 1.05])
+        plt.ylim([-0.05, 1.05])
+        plt.xlabel('False Positive Rate', size=20)
+        plt.ylabel('True Positive Rate', size=20)
+        plt.title(f'ROC curve. Target: {Target}, Class: {Class}. {plot_title}', size=20)
+        plt.legend(loc="lower right", prop={'size': 20})
+        plt.savefig(os.path.join(OutPath,f"ROC_{Target}_{Class}{suffix}.svg"), dpi=300)
+        plt.close()
+    return True
+
+def _make_roc_plot(df: pd.DataFrame, TestColumn: str = 'Y_true',
+                   PredColumn: str = 'Y_pred',
+                   RepeatColumn: str = 'Repeat',
+                   FoldColumn: str = 'Fold',
+                   DataSetColumn: str = 'Dataset',
+                   OutPath: str = None,
+                   n_thresholds: int = 50,
+                   return_curve: bool = True,
+                   plot_title=""):
+    '''
+    Make ROC plots from a dataframe that contains multiple folds/repeat of test predictions
+
+    df: pandas Datatrame
+    TestColumn: str, column name for true test labels
+    PredColumn: str, column name for proba of predicted test labels
+    RepeatColumn: str, column name for repeat number of cross-validation
+    FoldColumn: str, column name for fold number of cross-validation
+    DataSetColumn: str, column name for dataset (train/test)
+    OutPath: str, output directory for ROC plots (if empty, just display the column)
+    n_thresholds: int, number of thresholds to use for ROC curve (default: 100)
+    '''
+
+    # Filter for test set data
+    test_df = df[df[DataSetColumn] == 'test']
+
+    # Get unique repeats
+    repeats = test_df[RepeatColumn].unique()
+
+    plt.figure(figsize=(10, 8))
+
+    tprs = []
+    aucs = []
+    mean_fpr = np.linspace(0, 1, n_thresholds)
+
+    for r in repeats:
+        repeat_df = test_df[test_df[RepeatColumn] == r]
+
+        for f in repeat_df[FoldColumn].unique():
+            fold_df = repeat_df[repeat_df[FoldColumn] == f]
+
+            fpr, tpr, _ = roc_curve(fold_df[TestColumn], fold_df[PredColumn])
+            roc_auc = auc(fpr, tpr)
+
+            plt.plot(fpr, tpr, lw=1, alpha=0.1, color='black') #label=f'ROC fold {f}, repeat {r} (AUC = {roc_auc:.2f})')
+
+
+            tprs.append(interp(mean_fpr, fpr, tpr))
+            tprs[-1][0] = 0.0
+            aucs.append(roc_auc)
+
+    plt.plot([0, 1], [0, 1], linestyle='--', lw=2, color='r', label='Chance', alpha=.8)
+
+    mean_tpr = np.mean(tprs, axis=0)
+    mean_tpr[-1] = 1.0
+    mean_auc = auc(mean_fpr, mean_tpr)
+    std_auc = np.std(aucs)
+    plt.plot(mean_fpr, mean_tpr, color='b',
+             label=f'Mean ROC (AUC = {mean_auc:.2f} ± {std_auc:.2f})',
+             lw=3, alpha=1)
+
+    std_tpr = np.std(tprs, axis=0)
+    ci_tpr = stats.norm.ppf(0.99) * std_tpr / np.sqrt(len(tprs))
+
+    tprs_upper = np.minimum(mean_tpr + ci_tpr, 1)
+    tprs_lower = np.maximum(mean_tpr - ci_tpr, 0)
+
+    plt.fill_between(mean_fpr, tprs_lower, tprs_upper, color='grey', alpha=.2) #label=f'± 1 std. dev.'
+
+    plt.xlim([-0.05, 1.05])
+    plt.ylim([-0.05, 1.05])
+    plt.xlabel('False Positive Rate', size=20)
+    plt.ylabel('True Positive Rate', size=20)
+    plt.title(f'ROC curve. {plot_title}', size=20)
+    plt.legend(loc="lower right", prop={'size': 20})
+
+    if OutPath:
+        plt.savefig(OutPath, dpi=300)
+    else:
+        plt.show()
+
+    plt.close()
+
+    if return_curve:
+        return mean_auc, std_auc, (mean_fpr, mean_tpr, ci_tpr)
+    else:
+        return mean_auc, std_auc, None
+
+# def make_precisionRecall_plots():
+#     pass
+# def make_f1_plots():
+#     pass
+# def make_recall_plots():
+#     pass
+# def make_precision_plots():
+#     pass
+# def make_npv_plots():
+#     pass
+
+
+
