@@ -19,7 +19,10 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.utils.validation import check_is_fitted
 from sklearn.calibration import IsotonicRegression, _SigmoidCalibration
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import roc_curve, auc
+from sklearn.metrics import roc_curve, auc, confusion_matrix, recall_score, precision_score
+from sklearn.metrics import precision_recall_curve, average_precision_score
+from sklearn.metrics import precision_score, f1_score
+
 from numpy import interp
 
 
@@ -706,7 +709,7 @@ def create_calibration_plots(df: pd.DataFrame = None,
             fig, ax = plt.subplots(ncols=2, figsize=(19, 7))
             ax[0].plot(cCurveTrain[0], cCurveTrain[1], marker='o', label='Train', lw=2)
             ax[0].plot(cCurveTest[0], cCurveTest[1], marker='o', label='Test', lw=2)
-            ax[0].plot([0, 1], [0, 1], color='red', style='--', lw=2)
+            ax[0].plot([0, 1], [0, 1], color='red', linestyle='--', lw=2)
             ax[0].legend()
             ax[0].set_xlabel('Model probability', size=20)
             ax[0].set_ylabel('Actual probability', size=20)
@@ -922,16 +925,685 @@ def _make_roc_plot(df: pd.DataFrame, TestColumn: str = 'Y_true',
     else:
         return mean_auc, std_auc, None
 
-# def make_precisionRecall_plots():
-#     pass
-# def make_f1_plots():
-#     pass
-# def make_recall_plots():
-#     pass
-# def make_precision_plots():
-#     pass
-# def make_npv_plots():
-#     pass
+def make_precisionRecall_plots(df,
+                               OutPath: str=None,
+                               FoldColumn: str='Fold',
+                               RepeatColumn: str='Repeat',
+                               DataSetColumn: str='Dataset',
+                               n_thresholds: int=50,
+                               Target: Literal=['Heart Axis', 'Muscle', 'Conduction'],
+                               plot_title: str="",
+                               suffix: str='',
+                               mod_name: dict = {
+                                   'LR': 'Logistic Regression',
+                                   'XGB': 'eXtreme Gradient Boosting',
+                                   'customDT': 'Custom Decision Tree',
+                                   'normalDT': 'Normal Decision Tree',
+                               }
+                               ):
+    pred_strings = [c for c in df.columns if c.startswith('Y_pred')]
+    Classes = set([s.split("_")[3] for s in pred_strings])
+    Models = set([s.split("_")[2] for s in pred_strings])
+
+    for Class in Classes:
+        plt.figure(figsize=(10, 8))
+        for Model in Models:
+            _OutPath = os.path.join(OutPath, f"PrecisionRecall_curve_{Class}_{Model}{suffix}.svg")
+            _Title = f"Target: {Target}, Class: {Class}, Model: {Model}"
+            mean_auprc, std_auprc, pr_curve_data = _make_precisionRecall_plot(df,
+                                                       TestColumn=f'Y_true_{Class}',
+                                                       PredColumn=f'Y_pred_{Model}_{Class}{suffix}',
+                                                       FoldColumn=FoldColumn,
+                                                       RepeatColumn=RepeatColumn,
+                                                       DataSetColumn=DataSetColumn,
+                                                       OutPath=_OutPath,
+                                                       n_thresholds=n_thresholds,
+                                                       plot_title=_Title,
+                                                       return_curve=True)
+
+            plt.plot(pr_curve_data[0], pr_curve_data[1],
+                     label=f"{mod_name[Model]}. AUPRC={round(mean_auprc,2)} ± {round(std_auprc,2)}", lw=2)
+            line_color = plt.gca().lines[-1].get_color()
+            precision_lower = np.maximum(pr_curve_data[1] - pr_curve_data[2], 0)
+            precision_upper = np.minimum(pr_curve_data[1] + pr_curve_data[2], 1)
+            plt.fill_between(pr_curve_data[0], precision_lower, precision_upper, color=line_color, alpha=.1)
+
+        plt.xlim([-0.05, 1.05])
+        plt.ylim([-0.05, 1.05])
+        plt.xlabel('Recall', size=20)
+        plt.ylabel('Precision', size=20)
+        plt.title(f'Precision-Recall curve. Target: {Target}, Class: {Class}. {plot_title}', size=20)
+        plt.legend(loc="lower left", prop={'size': 20})
+        plt.savefig(os.path.join(OutPath,f"PrecisionRecall_{Target}_{Class}{suffix}.svg"), dpi=300)
+        plt.close()
+    return True
 
 
+def _make_precisionRecall_plot(df: pd.DataFrame, TestColumn: str = 'Y_true',
+                               PredColumn: str = 'Y_pred',
+                               RepeatColumn: str = 'Repeat',
+                               FoldColumn: str = 'Fold',
+                               DataSetColumn: str = 'Dataset',
+                               OutPath: str = None,
+                               n_thresholds: int = 50,
+                               return_curve: bool = True,
+                               plot_title=""):
+    # Filter for test set data
+    test_df = df[df[DataSetColumn] == 'test']
 
+    # Get unique repeats
+    repeats = test_df[RepeatColumn].unique()
+
+    plt.figure(figsize=(10, 8))
+
+    precisions = []
+    auprcs = []
+    mean_recall = np.linspace(0, 1, n_thresholds)
+
+    for r in repeats:
+        repeat_df = test_df[test_df[RepeatColumn] == r]
+
+        for f in repeat_df[FoldColumn].unique():
+            fold_df = repeat_df[repeat_df[FoldColumn] == f]
+
+            precision, recall, _ = precision_recall_curve(fold_df[TestColumn], fold_df[PredColumn])
+            auprc = average_precision_score(fold_df[TestColumn], fold_df[PredColumn])
+
+            plt.plot(recall, precision, lw=1, alpha=0.1, color='black')
+
+            precisions.append(interp(mean_recall, recall[::-1], precision[::-1]))
+            auprcs.append(auprc)
+
+    mean_precision = np.mean(precisions, axis=0)
+    mean_auprc = np.mean(auprcs)
+    std_auprc = np.std(auprcs)
+    plt.plot(mean_recall, mean_precision, color='b',
+             label=f'Mean PR (AUPRC = {mean_auprc:.2f} ± {std_auprc:.2f})',
+             lw=3, alpha=1)
+
+    std_precision = np.std(precisions, axis=0)
+    ci_precision = stats.norm.ppf(0.99) * std_precision / np.sqrt(len(precisions))
+
+    precision_upper = np.minimum(mean_precision + ci_precision, 1)
+    precision_lower = np.maximum(mean_precision - ci_precision, 0)
+
+    plt.fill_between(mean_recall, precision_lower, precision_upper, color='grey', alpha=.2)
+
+    plt.xlim([-0.05, 1.05])
+    plt.ylim([-0.05, 1.05])
+    plt.xlabel('Recall', size=20)
+    plt.ylabel('Precision', size=20)
+    plt.title(f'Precision-Recall curve. {plot_title}', size=20)
+    plt.legend(loc="lower left", prop={'size': 20})
+
+    if OutPath:
+        plt.savefig(OutPath, dpi=300)
+    else:
+        plt.show()
+
+    plt.close()
+
+    if return_curve:
+        return mean_auprc, std_auprc, (mean_recall, mean_precision, ci_precision)
+    else:
+        return mean_auprc, std_auprc, None
+
+
+def make_recall_plots(df,
+                      OutPath: str = None,
+                      FoldColumn: str = 'Fold',
+                      RepeatColumn: str = 'Repeat',
+                      DataSetColumn: str = 'Dataset',
+                      n_thresholds: int = 50,
+                      Target: Literal=['Heart Axis', 'Muscle', 'Conduction'],
+                      plot_title: str = "",
+                      suffix: str = '',
+                      mod_name: dict = {
+                          'LR': 'Logistic Regression',
+                          'XGB': 'eXtreme Gradient Boosting',
+                          'customDT': 'Custom Decision Tree',
+                          'normalDT': 'Normal Decision Tree',
+                      },
+                      only_data: bool=False
+                      ):
+    '''
+    Function to create plots with proba_thresholds versus recall-score.
+    '''
+    pred_strings = [c for c in df.columns if c.startswith('Y_pred')]
+    Classes = set([s.split("_")[3] for s in pred_strings])
+    Models = set([s.split("_")[2] for s in pred_strings])
+
+    for Class in Classes:
+        data_list = []
+        plt.figure(figsize=(10, 8))
+        for Model in Models:
+            _OutPath = os.path.join(OutPath, f"Recall_curve_{Class}_{Model}{suffix}.svg")
+            _Title = f"Target: {Target}, Class: {Class}, Model: {Model}"
+            mean_recall, std_recall, recall_curve_data = _make_recall_plot(df,
+                                                                           TestColumn=f'Y_true_{Class}',
+                                                                           PredColumn=f'Y_pred_{Model}_{Class}{suffix}',
+                                                                           FoldColumn=FoldColumn,
+                                                                           RepeatColumn=RepeatColumn,
+                                                                           DataSetColumn=DataSetColumn,
+                                                                           OutPath=_OutPath,
+                                                                           n_thresholds=n_thresholds,
+                                                                           plot_title=_Title,
+                                                                           return_curve=True)
+            data_list.append({'thresholds': list(recall_curve_data[0]),
+                              'mean_value': list(recall_curve_data[1]),
+                              'std_value': list(recall_curve_data[2]),
+                              'Model': len(recall_curve_data[0])*[Model]
+                            })
+
+            if only_data == False:
+                plt.plot(recall_curve_data[0], recall_curve_data[1],
+                         label=f"{mod_name[Model]}. Mean Recall={round(mean_recall, 2)} ± {round(std_recall, 2)}", lw=2)
+                line_color = plt.gca().lines[-1].get_color()
+                recall_lower = np.maximum(recall_curve_data[1] - recall_curve_data[2], 0)
+                recall_upper = np.minimum(recall_curve_data[1] + recall_curve_data[2], 1)
+                plt.fill_between(recall_curve_data[0], recall_lower, recall_upper, color=line_color, alpha=.1)
+
+        if only_data == False:
+            plt.xlim([-0.05, 1.05])
+            plt.ylim([-0.05, 1.05])
+            plt.xlabel('Probability Threshold', size=20)
+            plt.ylabel('Recall', size=20)
+            plt.title(f'Recall vs Threshold. Target: {Target}, Class: {Class}. {plot_title}', size=20)
+            plt.legend(loc="lower left", prop={'size': 20})
+            plt.savefig(os.path.join(OutPath, f"Recall_{Target}_{Class}{suffix}.svg"), dpi=300)
+        plt.close()
+
+        data_df = pd.DataFrame()
+        for _df in data_list:
+            data_df = pd.concat([data_df, pd.DataFrame.from_dict(_df, orient='columns')])
+        data_df.to_csv(os.path.join(OutPath, f"Recall_{Target}_{Class}{suffix}_DATA.csv"), sep="\t")
+    return True
+
+
+def _make_recall_plot(df: pd.DataFrame, TestColumn: str = 'Y_true',
+                      PredColumn: str = 'Y_pred',
+                      RepeatColumn: str = 'Repeat',
+                      FoldColumn: str = 'Fold',
+                      DataSetColumn: str = 'Dataset',
+                      OutPath: str = None,
+                      n_thresholds: int = 50,
+                      return_curve: bool = True,
+                      plot_title="",
+                      only_data: bool=False):
+    if only_data:
+        return_curve=True
+        
+    test_df = df[df[DataSetColumn] == 'test']
+    repeats = test_df[RepeatColumn].unique()
+
+    plt.figure(figsize=(10, 8))
+
+    recalls = []
+    thresholds = np.linspace(0, 1, n_thresholds)
+    for r in repeats:
+        repeat_df = test_df[test_df[RepeatColumn] == r]
+        for f in repeat_df[FoldColumn].unique():
+            fold_df = repeat_df[repeat_df[FoldColumn] == f]
+
+            fold_recalls = []
+            for threshold in thresholds:
+                y_pred = (fold_df[PredColumn] >= threshold).astype(int)
+                recall = recall_score(fold_df[TestColumn], y_pred)
+                fold_recalls.append(recall)
+            if only_data == False:
+                plt.plot(thresholds, fold_recalls, lw=1, alpha=0.1, color='black')
+            recalls.append(fold_recalls)
+
+    mean_recall = np.mean(recalls, axis=0)
+    std_recall = np.std(recalls, axis=0)
+
+    if only_data == False:
+        plt.plot(thresholds, mean_recall, color='b',
+                 label=f'Mean Recall',
+                 lw=3, alpha=1)
+
+    recall_upper = np.minimum(mean_recall + std_recall, 1)
+    recall_lower = np.maximum(mean_recall - std_recall, 0)
+
+    if only_data == False:
+        plt.fill_between(thresholds, recall_lower, recall_upper, color='grey', alpha=.2)
+        plt.xlim([-0.05, 1.05])
+        plt.ylim([-0.05, 1.05])
+        plt.xlabel('Probability Threshold', size=20)
+        plt.ylabel('Recall', size=20)
+        plt.title(f'Recall vs Threshold. {plot_title}', size=20)
+        plt.legend(loc="lower left", prop={'size': 20})
+
+        if OutPath:
+            plt.savefig(OutPath, dpi=300)
+        else:
+            plt.show()
+    plt.close()
+
+    if return_curve:
+        return np.mean(mean_recall), np.mean(std_recall), (thresholds, mean_recall, std_recall)
+    else:
+        return np.mean(mean_recall), np.mean(std_recall), None
+
+
+def make_npv_plots(df,
+                   OutPath: str = None,
+                   FoldColumn: str = 'Fold',
+                   RepeatColumn: str = 'Repeat',
+                   DataSetColumn: str = 'Dataset',
+                   n_thresholds: int = 50,
+                   Target: Literal=['Heart Axis', 'Muscle', 'Conduction'],
+                   plot_title: str = "",
+                   suffix: str = '',
+                   mod_name: dict = {
+                       'LR': 'Logistic Regression',
+                       'XGB': 'eXtreme Gradient Boosting',
+                       'customDT': 'Custom Decision Tree',
+                       'normalDT': 'Normal Decision Tree',
+                   },
+                   only_data: bool = False
+                   ):
+    '''
+    Function to create plots with proba_thresholds versus negative predictive value.
+    '''
+    pred_strings = [c for c in df.columns if c.startswith('Y_pred')]
+    Classes = set([s.split("_")[3] for s in pred_strings])
+    Models = set([s.split("_")[2] for s in pred_strings])
+
+    for Class in Classes:
+        data_list = []
+        plt.figure(figsize=(10, 8))
+        for Model in Models:
+            _OutPath = os.path.join(OutPath, f"NPV_curve_{Class}_{Model}{suffix}.svg")
+            _Title = f"Target: {Target}, Class: {Class}, Model: {Model}"
+            mean_npv, std_npv, npv_curve_data = _make_npv_plot(df,
+                                                               TestColumn=f'Y_true_{Class}',
+                                                               PredColumn=f'Y_pred_{Model}_{Class}{suffix}',
+                                                               FoldColumn=FoldColumn,
+                                                               RepeatColumn=RepeatColumn,
+                                                               DataSetColumn=DataSetColumn,
+                                                               OutPath=_OutPath,
+                                                               n_thresholds=n_thresholds,
+                                                               plot_title=_Title,
+                                                               return_curve=True,
+                                                               only_data=only_data)
+            data_list.append({'thresholds': list(npv_curve_data[0]),
+                              'mean_value': list(npv_curve_data[1]),
+                              'std_value': list(npv_curve_data[2]),
+                              'Model': len(npv_curve_data[0])*[Model]
+                            })
+
+            if only_data == False:
+                plt.plot(npv_curve_data[0], npv_curve_data[1],
+                         label=f"{mod_name[Model]}. Mean NPV={round(mean_npv, 2)} ± {round(std_npv, 2)}", lw=2)
+                line_color = plt.gca().lines[-1].get_color()
+                npv_lower = np.maximum(npv_curve_data[1] - npv_curve_data[2], 0)
+                npv_upper = np.minimum(npv_curve_data[1] + npv_curve_data[2], 1)
+                plt.fill_between(npv_curve_data[0], npv_lower, npv_upper, color=line_color, alpha=.1)
+
+        if only_data == False:
+            plt.xlim([-0.05, 1.05])
+            plt.ylim([-0.05, 1.05])
+            plt.xlabel('Probability Threshold', size=20)
+            plt.ylabel('Negative Predictive Value', size=20)
+            plt.title(f'NPV vs Threshold. Target: {Target}, Class: {Class}. {plot_title}', size=20)
+            plt.legend(loc="lower left", prop={'size': 20})
+            plt.savefig(os.path.join(OutPath, f"NPV_{Target}_{Class}{suffix}.svg"), dpi=300)
+        plt.close()
+
+        data_df = pd.DataFrame()
+        for _df in data_list:
+            data_df = pd.concat([data_df, pd.DataFrame.from_dict(_df, orient='columns')])
+        data_df.to_csv(os.path.join(OutPath, f"NPV_{Target}_{Class}{suffix}_DATA.csv"), sep="\t")
+    return True
+
+
+def _make_npv_plot(df: pd.DataFrame, TestColumn: str = 'Y_true',
+                   PredColumn: str = 'Y_pred',
+                   RepeatColumn: str = 'Repeat',
+                   FoldColumn: str = 'Fold',
+                   DataSetColumn: str = 'Dataset',
+                   OutPath: str = None,
+                   n_thresholds: int = 50,
+                   return_curve: bool = True,
+                   plot_title="",
+                   only_data: bool = False):
+    if only_data:
+        return_curve=True
+
+    test_df = df[df[DataSetColumn] == 'test']
+    repeats = test_df[RepeatColumn].unique()
+
+    plt.figure(figsize=(10, 8))
+
+    npvs = []
+    thresholds = np.linspace(0, 1, n_thresholds)
+
+    for r in repeats:
+        repeat_df = test_df[test_df[RepeatColumn] == r]
+
+        for f in repeat_df[FoldColumn].unique():
+            fold_df = repeat_df[repeat_df[FoldColumn] == f]
+
+            fold_npvs = []
+            for threshold in thresholds:
+                y_pred = (fold_df[PredColumn] >= threshold).astype(int)
+                tn, fp, fn, tp = confusion_matrix(fold_df[TestColumn], y_pred).ravel()
+                npv = tn / (tn + fn) if (tn + fn) > 0 else 0
+                fold_npvs.append(npv)
+            if only_data == False:
+                plt.plot(thresholds, fold_npvs, lw=1, alpha=0.1, color='black')
+            npvs.append(fold_npvs)
+
+    mean_npv = np.mean(npvs, axis=0)
+    std_npv = np.std(npvs, axis=0)
+
+    if only_data == False:
+        plt.plot(thresholds, mean_npv, color='b',
+                 label=f'Mean NPV',
+                 lw=3, alpha=1)
+
+    npv_upper = np.minimum(mean_npv + std_npv, 1)
+    npv_lower = np.maximum(mean_npv - std_npv, 0)
+
+    if only_data == False:
+        plt.fill_between(thresholds, npv_lower, npv_upper, color='grey', alpha=.2)
+
+        plt.xlim([-0.05, 1.05])
+        plt.ylim([-0.05, 1.05])
+        plt.xlabel('Probability Threshold', size=20)
+        plt.ylabel('Negative Predictive Value', size=20)
+        plt.title(f'NPV vs Threshold. {plot_title}', size=20)
+        plt.legend(loc="lower left", prop={'size': 20})
+
+        if OutPath:
+            plt.savefig(OutPath, dpi=300)
+        else:
+            plt.show()
+    plt.close()
+
+    if return_curve:
+        return np.mean(mean_npv), np.mean(std_npv), (thresholds, mean_npv, std_npv)
+    else:
+        return np.mean(mean_npv), np.mean(std_npv), None
+
+
+def make_precision_plots(df,
+                         OutPath: str = None,
+                         FoldColumn: str = 'Fold',
+                         RepeatColumn: str = 'Repeat',
+                         DataSetColumn: str = 'Dataset',
+                         n_thresholds: int = 50,
+                         Target: Literal=['Heart Axis', 'Muscle', 'Conduction'],
+                         plot_title: str = "",
+                         suffix: str = '',
+                         mod_name: dict = {
+                             'LR': 'Logistic Regression',
+                             'XGB': 'eXtreme Gradient Boosting',
+                             'customDT': 'Custom Decision Tree',
+                             'normalDT': 'Normal Decision Tree',
+                         },
+                         only_data:bool = False
+                         ):
+    '''
+    Function to create plots with proba_thresholds versus precision (PPV).
+    '''
+    pred_strings = [c for c in df.columns if c.startswith('Y_pred')]
+    Classes = set([s.split("_")[3] for s in pred_strings])
+    Models = set([s.split("_")[2] for s in pred_strings])
+
+    for Class in Classes:
+        data_list = []
+        plt.figure(figsize=(10, 8))
+        for Model in Models:
+            _OutPath = os.path.join(OutPath, f"Precision_curve_{Class}_{Model}{suffix}.svg")
+            _Title = f"Target: {Target}, Class: {Class}, Model: {Model}"
+            mean_precision, std_precision, precision_curve_data = _make_precision_plot(df,
+                                                                                       TestColumn=f'Y_true_{Class}',
+                                                                                       PredColumn=f'Y_pred_{Model}_{Class}{suffix}',
+                                                                                       FoldColumn=FoldColumn,
+                                                                                       RepeatColumn=RepeatColumn,
+                                                                                       DataSetColumn=DataSetColumn,
+                                                                                       OutPath=_OutPath,
+                                                                                       n_thresholds=n_thresholds,
+                                                                                       plot_title=_Title,
+                                                                                       return_curve=True,
+                                                                                       only_data=only_data)
+            data_list.append({'thresholds': list(precision_curve_data[0]),
+                              'mean_value': list(precision_curve_data[1]),
+                              'std_value': list(precision_curve_data[2]),
+                              'Model': len(precision_curve_data[0])*[Model]
+                              })
+
+            if only_data == False:
+                plt.plot(precision_curve_data[0], precision_curve_data[1],
+                         label=f"{mod_name[Model]}. Mean Precision={round(mean_precision, 2)} ± {round(std_precision, 2)}",
+                         lw=2)
+                line_color = plt.gca().lines[-1].get_color()
+                precision_lower = np.maximum(precision_curve_data[1] - precision_curve_data[2], 0)
+                precision_upper = np.minimum(precision_curve_data[1] + precision_curve_data[2], 1)
+                plt.fill_between(precision_curve_data[0], precision_lower, precision_upper, color=line_color, alpha=.1)
+
+        if only_data == False:
+            plt.xlim([-0.05, 1.05])
+            plt.ylim([-0.05, 1.05])
+            plt.xlabel('Probability Threshold', size=20)
+            plt.ylabel('Precision', size=20)
+            plt.title(f'Precision vs Threshold. Target: {Target}, Class: {Class}. {plot_title}', size=20)
+            plt.legend(loc="lower left", prop={'size': 20})
+            plt.savefig(os.path.join(OutPath, f"Precision_{Target}_{Class}{suffix}.svg"), dpi=300)
+        plt.close()
+
+        data_df = pd.DataFrame()
+        for _df in data_list:
+            data_df = pd.concat([data_df, pd.DataFrame.from_dict(_df, orient='columns')])
+        data_df.to_csv(os.path.join(OutPath, f"Precision_{Target}_{Class}{suffix}_DATA.csv"), sep="\t")
+    return True
+
+
+def _make_precision_plot(df: pd.DataFrame, TestColumn: str = 'Y_true',
+                         PredColumn: str = 'Y_pred',
+                         RepeatColumn: str = 'Repeat',
+                         FoldColumn: str = 'Fold',
+                         DataSetColumn: str = 'Dataset',
+                         OutPath: str = None,
+                         n_thresholds: int = 50,
+                         return_curve: bool = True,
+                         plot_title="",
+                         only_data:bool = False):
+    if only_data:
+        return_curve=True
+
+    test_df = df[df[DataSetColumn] == 'test']
+    repeats = test_df[RepeatColumn].unique()
+
+    plt.figure(figsize=(10, 8))
+
+    precisions = []
+    thresholds = np.linspace(0, 1, n_thresholds)
+
+    for r in repeats:
+        repeat_df = test_df[test_df[RepeatColumn] == r]
+
+        for f in repeat_df[FoldColumn].unique():
+            fold_df = repeat_df[repeat_df[FoldColumn] == f]
+            fold_precisions = []
+            for threshold in thresholds:
+                y_pred = (fold_df[PredColumn] >= threshold).astype(int)
+                precision = precision_score(fold_df[TestColumn], y_pred, zero_division=1)
+                fold_precisions.append(precision)
+            if only_data == False:
+                plt.plot(thresholds, fold_precisions, lw=1, alpha=0.1, color='black')
+            precisions.append(fold_precisions)
+
+    mean_precision = np.mean(precisions, axis=0)
+    std_precision = np.std(precisions, axis=0)
+
+    if only_data == False:
+        plt.plot(thresholds, mean_precision, color='b',
+             label=f'Mean Precision',
+             lw=3, alpha=1)
+
+    precision_upper = np.minimum(mean_precision + std_precision, 1)
+    precision_lower = np.maximum(mean_precision - std_precision, 0)
+
+    if only_data == False:
+        plt.fill_between(thresholds, precision_lower, precision_upper, color='grey', alpha=.2)
+
+        plt.xlim([-0.05, 1.05])
+        plt.ylim([-0.05, 1.05])
+        plt.xlabel('Probability Threshold', size=20)
+        plt.ylabel('Precision', size=20)
+        plt.title(f'Precision vs Threshold. {plot_title}', size=20)
+        plt.legend(loc="lower left", prop={'size': 20})
+
+        if OutPath:
+            plt.savefig(OutPath, dpi=300)
+        else:
+            plt.show()
+    plt.close()
+
+    if return_curve:
+        return np.mean(mean_precision), np.mean(std_precision), (thresholds, mean_precision, std_precision)
+    else:
+        return np.mean(mean_precision), np.mean(std_precision), None
+
+
+def make_f1_plots(df,
+                  OutPath: str = None,
+                  FoldColumn: str = 'Fold',
+                  RepeatColumn: str = 'Repeat',
+                  DataSetColumn: str = 'Dataset',
+                  n_thresholds: int = 50,
+                  Target: Literal=['Heart Axis', 'Muscle', 'Conduction'],
+                  plot_title: str = "",
+                  suffix: str = '',
+                  mod_name: dict = {
+                      'LR': 'Logistic Regression',
+                      'XGB': 'eXtreme Gradient Boosting',
+                      'customDT': 'Custom Decision Tree',
+                      'normalDT': 'Normal Decision Tree',
+                  },
+                  only_data: bool=False
+                  ):
+    '''
+    Function to create plots with proba_thresholds versus f1-score.
+    '''
+    pred_strings = [c for c in df.columns if c.startswith('Y_pred')]
+    Classes = set([s.split("_")[3] for s in pred_strings])
+    Models = set([s.split("_")[2] for s in pred_strings])
+
+    for Class in Classes:
+        data_list = []
+        plt.figure(figsize=(10, 8))
+        for Model in Models:
+            _OutPath = os.path.join(OutPath, f"F1_curve_{Class}_{Model}{suffix}.svg")
+            _Title = f"Target: {Target}, Class: {Class}, Model: {Model}"
+            mean_f1, std_f1, f1_curve_data = _make_f1_plot(df,
+                                                           TestColumn=f'Y_true_{Class}',
+                                                           PredColumn=f'Y_pred_{Model}_{Class}{suffix}',
+                                                           FoldColumn=FoldColumn,
+                                                           RepeatColumn=RepeatColumn,
+                                                           DataSetColumn=DataSetColumn,
+                                                           OutPath=_OutPath,
+                                                           n_thresholds=n_thresholds,
+                                                           plot_title=_Title,
+                                                           return_curve=True,
+                                                           only_data = only_data)
+            data_list.append({'thresholds': list(f1_curve_data[0]),
+                              'mean_value': list(f1_curve_data[1]),
+                              'std_value': list(f1_curve_data[2]),
+                              'Model': len(f1_curve_data[0])*[Model]
+                              })
+            if only_data == False:
+                plt.plot(f1_curve_data[0], f1_curve_data[1],
+                         label=f"{mod_name[Model]}. Mean F1={round(mean_f1, 2)} ± {round(std_f1, 2)}", lw=2)
+                line_color = plt.gca().lines[-1].get_color()
+                f1_lower = np.maximum(f1_curve_data[1] - f1_curve_data[2], 0)
+                f1_upper = np.minimum(f1_curve_data[1] + f1_curve_data[2], 1)
+                plt.fill_between(f1_curve_data[0], f1_lower, f1_upper, color=line_color, alpha=.1)
+
+        if only_data == False:
+            plt.xlim([-0.05, 1.05])
+            plt.ylim([-0.05, 1.05])
+            plt.xlabel('Probability Threshold', size=20)
+            plt.ylabel('F1 Score', size=20)
+            plt.title(f'F1 Score vs Threshold. Target: {Target}, Class: {Class}. {plot_title}', size=20)
+            plt.legend(loc="lower left", prop={'size': 20})
+            plt.savefig(os.path.join(OutPath, f"F1_{Target}_{Class}{suffix}.svg"), dpi=300)
+        plt.close()
+
+        # process data into dataframe and write to tsv file
+        data_df = pd.DataFrame()
+        for _df in data_list:
+            data_df = pd.concat([data_df, pd.DataFrame.from_dict(_df, orient='columns')])
+        data_df.to_csv(os.path.join(OutPath, f"F1_{Target}_{Class}{suffix}_DATA.csv"), sep="\t")
+
+    return True
+
+
+def _make_f1_plot(df: pd.DataFrame, TestColumn: str = 'Y_true',
+                  PredColumn: str = 'Y_pred',
+                  RepeatColumn: str = 'Repeat',
+                  FoldColumn: str = 'Fold',
+                  DataSetColumn: str = 'Dataset',
+                  OutPath: str = None,
+                  n_thresholds: int = 50,
+                  return_curve: bool = True,
+                  plot_title: str = "",
+                  only_data: bool = False):
+
+    if only_data:
+        return_curve=True
+
+    test_df = df[df[DataSetColumn] == 'test']
+    repeats = test_df[RepeatColumn].unique()
+
+    plt.figure(figsize=(10, 8))
+
+    f1_scores = []
+    thresholds = np.linspace(0, 1, n_thresholds)
+
+    for r in repeats:
+        repeat_df = test_df[test_df[RepeatColumn] == r]
+
+        for f in repeat_df[FoldColumn].unique():
+            fold_df = repeat_df[repeat_df[FoldColumn] == f]
+            fold_f1_scores = []
+            for threshold in thresholds:
+                y_pred = (fold_df[PredColumn] >= threshold).astype(int)
+                f1 = f1_score(fold_df[TestColumn], y_pred)
+                fold_f1_scores.append(f1)
+
+            if only_data == False:
+                plt.plot(thresholds, fold_f1_scores, lw=1, alpha=0.1, color='black')
+            f1_scores.append(fold_f1_scores)
+
+    mean_f1 = np.mean(f1_scores, axis=0)
+    std_f1 = np.std(f1_scores, axis=0)
+
+    if only_data == False:
+        plt.plot(thresholds, mean_f1, color='b',
+                 label=f'Mean F1 Score',
+                 lw=3, alpha=1)
+        f1_upper = np.minimum(mean_f1 + std_f1, 1)
+        f1_lower = np.maximum(mean_f1 - std_f1, 0)
+        plt.fill_between(thresholds, f1_lower, f1_upper, color='grey', alpha=.2)
+
+        plt.xlim([-0.05, 1.05])
+        plt.ylim([-0.05, 1.05])
+        plt.xlabel('Probability Threshold', size=20)
+        plt.ylabel('F1 Score', size=20)
+        plt.title(f'F1 Score vs Threshold. {plot_title}', size=20)
+        plt.legend(loc="lower left", prop={'size': 20})
+
+        if OutPath:
+            plt.savefig(OutPath, dpi=300)
+        else:
+            plt.show()
+    plt.close()
+
+    if return_curve:
+        return np.mean(mean_f1), np.mean(std_f1), (thresholds, mean_f1, std_f1)
+    else:
+        return np.mean(mean_f1), np.mean(std_f1), None
