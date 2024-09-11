@@ -23,6 +23,8 @@ from sklearn.metrics import roc_curve, auc, confusion_matrix, recall_score, prec
 from sklearn.metrics import precision_recall_curve, average_precision_score
 from sklearn.metrics import precision_score, f1_score
 
+import seaborn as sns
+from matplotlib.colors import ListedColormap
 from numpy import interp
 
 
@@ -114,6 +116,7 @@ def net_benefit_curve_plot(results: pd.DataFrame = None,
                            file_suffix="",
                            calibrated=False,
                            dataset="test",
+                           mod_order = ['XGB', 'LR', 'customDT', 'normalDT'],
                            plot_title=""):
     """
     Plot net benefit curves for each target, with separate plots per target.
@@ -128,6 +131,11 @@ def net_benefit_curve_plot(results: pd.DataFrame = None,
     ylim (list): Y-axis limits for the plot.
     plot_title (str): Additional title text for the plots.
     """
+    
+    CMAP = ListedColormap(sns.color_palette('mako', 4))
+    color_list = list(CMAP.colors)
+    color_map = dict(zip(mod_order, color_list))
+            
     true_cols = [col for col in results.columns if col.startswith(true_col_prefix)
                  if len(col.split("_"))==3]
     if calibrated:
@@ -142,10 +150,11 @@ def net_benefit_curve_plot(results: pd.DataFrame = None,
         else:
             related_pred_cols = [col for col in pred_cols if col.endswith(f'_{target}')]
 
-        plt.figure(figsize=(12, 8))
-        first_curve = True
+        _, ax = plt.subplots(figsize=(10, 8))  
         for pred_col in related_pred_cols:
             model_name = pred_col.split('_')[2]  # Assuming format: Y_pred_modelname_xx
+            _color = color_map[model_name]
+            
             y_true = results.loc[results.Dataset == dataset, true_col]
             y_pred_proba = results.loc[results.Dataset == dataset, pred_col]
 
@@ -155,27 +164,27 @@ def net_benefit_curve_plot(results: pd.DataFrame = None,
             nb_thresholds, net_benefits, all_positive, all_negative =\
                 net_benefit_curve(y_true, y_pred_proba, thresholds[:-1])
 
-            plt.plot(nb_thresholds, net_benefits, label=f'{model_name}')
+            ax.plot(nb_thresholds, net_benefits, label=f'{model_name}', color=_color, lw=2)
 
-            if first_curve:
-                # Plot 'all positive' and 'all negative' lines
-                plt.plot(nb_thresholds, all_positive, label='All Positive', linestyle='-.', color='black', lw=2)
-                plt.plot(nb_thresholds, all_negative, label='All Negative', linestyle='--', color='black', lw=2)
-                first_curve=False
+        # Plot 'all positive' and 'all negative' lines
+        ax.plot(nb_thresholds, all_positive, label='All Positive', linestyle='-.', color='black', lw=2)
+        ax.plot(nb_thresholds, all_negative, label='All Negative', linestyle='--', color='black', lw=2)
 
-        plt.xlabel('Threshold')
-        plt.ylabel('Net Benefit')
-        plt.title(f'Net Benefit Curves. {plot_title}. Target={target} ')
-        plt.legend()
-        plt.grid(True)
+        ax.set_xlabel('Threshold', size=15)
+        ax.set_ylabel('Net Benefit', size=15)
+        ax.set_title(f'Net Benefit Curve - {target}', size=20)
+        ax.legend(loc="best", prop={'size': 13})
+        ax.grid(color='white')        
+        ax.set_facecolor("#EBEBEB")
+        ax.tick_params(axis='both', which='major', labelsize=15)        
 
         if xlim is not None:
-            plt.xlim(xlim)
+            ax.set_xlim(xlim)
         if ylim is not None:
             max_y = np.max(net_benefits)
             if max_y > ylim[1]:
                 ylim[1] = max_y
-            plt.ylim(ylim)
+            ax.set_ylim(ylim)
 
         if output_path:
             plt.savefig(f"{output_path}/net_benefit_curves_{target}{file_suffix}.svg", dpi=300)
@@ -685,11 +694,14 @@ def create_calibration_plots(df: pd.DataFrame = None,
                                         'customDT': 'Custom Decision Tree',
                                         'normalDT': 'Normal Decision Tree',
                                     },
+                             mod_order: list=['XGB', 'LR', 'normalDT'],
                              suffix=''):
     pred_strings = [c for c in df.columns if c.startswith('Y_pred')]
     Classes = set([s.split("_")[3] for s in pred_strings])
     Models = set([s.split("_")[2] for s in pred_strings])
-
+    
+    assert all([mod in Models for mod in mod_order]), "Preferred order list not overlapping "
+    Models = mod_order    
     for cl in tqdm.tqdm(Classes):
         for mod in Models:
             Yt = df.loc[df.Dataset == 'train', f'Y_true_{cl}']
@@ -729,7 +741,7 @@ def create_calibration_plots(df: pd.DataFrame = None,
                 f'{mod_name[mod]} calibration: ECE train/test: {round(ECEtrain, 2)}, {round(ECEtest, 2)}, R2 train/test: {round(R2Ctrain, 2)}, {round(R2Ctest, 2)}')
             plt.tight_layout()
             if write_out:
-                plt.savefig(os.path.join(output_path, f'CustomTree_CalibrationPlot_{cl}_{mod}{suffix}.svg'), dpi=300)
+                plt.savefig(os.path.join(output_path, f'CalibrationPlot_{cl}_{mod}{suffix}.svg'), dpi=300)
                 plt.close(fig)
 
 
@@ -797,16 +809,25 @@ def make_roc_plots(df,
                        'XGB': 'eXtreme Gradient Boosting',
                        'customDT': 'Custom Decision Tree',
                        'normalDT': 'Normal Decision Tree',
-                   }
+                   },
+                   mod_order: list=['XGB', 'LR', 'customDT', 'normalDT']
                    ):
 
     pred_strings = [c for c in df.columns if c.startswith('Y_pred')]
     Classes = set([s.split("_")[3] for s in pred_strings])
-    Models = set([s.split("_")[2] for s in pred_strings])
+    Models = set([s.split("_")[2] for s in pred_strings]) 
+    # assert that Models are overlapping the mod_name dict
 
+    CMAP = ListedColormap(sns.color_palette('mako', 4))
+    color_list = list(CMAP.colors)
+    color_map = dict(zip(mod_order, color_list))
+    
+    Models = mod_order
     for Class in Classes:
-        plt.figure(figsize=(10, 8))
+        fig, ax = plt.subplots(figsize=(10, 8))        
+        #color_iter = iter(CMAP.colors)
         for Model in Models:
+            color = color_map[Model]           
             _OutPath = os.path.join(OutPath, f"ROC_curve_{Class}_{Model}{suffix}.svg")
             _Title = f"Target: {Target}, Class: {Class}, Model: {Model}"
             mean_auc, std_auc, roc_curve_data = _make_roc_plot(df,
@@ -820,20 +841,30 @@ def make_roc_plots(df,
                                                        plot_title=_Title,
                                                        return_curve=True)
 
-            plt.plot(roc_curve_data[0], roc_curve_data[1],
-                         label=f"{mod_name[Model]}. AUC={round(mean_auc,2)} ± {round(std_auc,2)}", lw=2)
+            ax.plot(roc_curve_data[0], roc_curve_data[1],
+                     label=f"{mod_name[Model]}. AUC={round(mean_auc,2)} ± {round(std_auc,2)}",
+                     lw=2, color=color)
             line_color = plt.gca().lines[-1].get_color()
             tprs_lower = np.maximum(roc_curve_data[1] - roc_curve_data[2], 0)
             tprs_upper = np.minimum(roc_curve_data[1] + roc_curve_data[2], 1)
-            plt.fill_between(roc_curve_data[0], tprs_lower, tprs_upper, color=line_color, alpha=.1)  # label=f'± 1 std. dev.'
+            plt.fill_between(roc_curve_data[0], 
+                             tprs_lower, 
+                             tprs_upper, 
+                             color=color,
+                             cmap=CMAP,
+                             alpha=.1)  # label=f'± 1 std. dev.'
 
-        plt.plot([0, 1], [0, 1], linestyle='--', lw=2, color='black', label='Chance', alpha=.8)
-        plt.xlim([-0.05, 1.05])
-        plt.ylim([-0.05, 1.05])
-        plt.xlabel('False Positive Rate', size=20)
-        plt.ylabel('True Positive Rate', size=20)
-        plt.title(f'ROC curve. Target: {Target}, Class: {Class}. {plot_title}', size=20)
-        plt.legend(loc="lower right", prop={'size': 20})
+        plt.set_cmap(CMAP)
+        ax.plot([0, 1], [0, 1], linestyle='--', lw=2, color='black', label='Chance', alpha=.8)
+        ax.set_xlim([-0.05, 1.05])
+        ax.set_ylim([-0.05, 1.05])
+        ax.set_xlabel('False Positive Rate', size=15)
+        ax.set_ylabel('True Positive Rate', size=15)
+        ax.set_title(f'ROC curve - {Class}', size=20)
+        ax.set_facecolor("#EBEBEB")
+        ax.grid(color='white')
+        ax.tick_params(axis='both', which='major', labelsize=15)
+        ax.legend(loc="best", prop={'size': 13})
         plt.savefig(os.path.join(OutPath,f"ROC_{Target}_{Class}{suffix}.svg"), dpi=300)
         plt.close()
     return True
@@ -859,6 +890,7 @@ def _make_roc_plot(df: pd.DataFrame, TestColumn: str = 'Y_true',
     OutPath: str, output directory for ROC plots (if empty, just display the column)
     n_thresholds: int, number of thresholds to use for ROC curve (default: 100)
     '''
+    CMAP = ListedColormap(sns.color_palette('mako', 2))
 
     # Filter for test set data
     test_df = df[df[DataSetColumn] == 'test']
@@ -904,7 +936,10 @@ def _make_roc_plot(df: pd.DataFrame, TestColumn: str = 'Y_true',
     tprs_upper = np.minimum(mean_tpr + ci_tpr, 1)
     tprs_lower = np.maximum(mean_tpr - ci_tpr, 0)
 
-    plt.fill_between(mean_fpr, tprs_lower, tprs_upper, color='grey', alpha=.2) #label=f'± 1 std. dev.'
+    plt.fill_between(mean_fpr, tprs_lower, tprs_upper,
+                     facecolor='grey', color='black', 
+                     cmap=CMAP,
+                     alpha=.2, lw=2) #label=f'± 1 std. dev.'
 
     plt.xlim([-0.05, 1.05])
     plt.ylim([-0.05, 1.05])
