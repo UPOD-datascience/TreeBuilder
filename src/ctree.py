@@ -26,7 +26,7 @@ import dotenv
 #TODO must: add error handling in main functions
 import logging
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class Node:
