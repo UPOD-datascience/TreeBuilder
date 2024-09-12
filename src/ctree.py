@@ -176,14 +176,14 @@ class LoadRules:
     def get_processed_rules(self) -> RuleNode:
         return self.root
 
-class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
+class CustomDecisionTree(BaseEstimator, ClassifierMixin):
     def __init__(self,
                  custom_rules: Union[Dict[str, Any], RuleNode] = None,
                  criterion: str='gini', 
                  tot_max_depth: int = None,
                  max_depth: int = None,
-                 min_samples_split: int = 2,
-                 min_samples_leaf: int = 1,
+                 min_samples_split: int = 10,
+                 min_samples_leaf: int = 5,
                  random_state: int=None,
                  prune_threshold: float=0.9,
                  TargetMap: Dict[int,str]=None,
@@ -192,13 +192,16 @@ class CustomDecisionTreeV2(BaseEstimator, ClassifierMixin):
         Custom decision tree builder v2; this applies the custom tree first and then continues
         building trees from the leaves of the custom tree.
 
-        :param custom_rules: Dictionary of custom rules
+        :param custom_rules: Dictionary of custom rules or a RuleNode object
         :param criterion: the decision tree criterion
+        :param tot_max_depth: total maximum depth of the decision tree
         :param max_depth: maximum depth of the decision tree
-        :param random_state: the seed
-
-        # TODO: make sure that the total_max_depth is respected, probably problem with recursive tree generation
-        # --> during tree generation, keep track of total depth, should <tot_max_depth
+        :param min_samples_split: minimum number of samples required to split an internal node
+        :param min_samples_leaf: minimum number of samples required to be at a leaf node
+        :param random_state: the seed used by the random number generator
+        :param prune_threshold: threshold for pruning the tree
+        :param TargetMap: dictionary mapping target labels to their names
+        :param Tree_kwargs: additional keyword arguments for the DecisionTreeClassifier
         '''
         super().__init__()
         self.custom_rules = custom_rules
@@ -956,7 +959,7 @@ if __name__ == "__main__":
         rules_loader = LoadRules(rules_path)
         processed_rules = rules_loader.get_processed_rules()
 
-        clf = CustomDecisionTreeV2(custom_rules=processed_rules, Tree_kwargs=TreeKwargs)
+        clf = CustomDecisionTree(custom_rules=processed_rules, Tree_kwargs=TreeKwargs)
         clf.fit(X_train, y_train)
         # Make predictions
         y_pred = clf.predict(X_test)
@@ -1002,7 +1005,7 @@ if __name__ == "__main__":
         processed_rules = rules_loader.get_processed_rules()
 
         # Create and train the custom decision tree
-        clf = CustomDecisionTreeV2(custom_rules=processed_rules, criterion='gini', max_depth=5, random_state=42)
+        clf = CustomDecisionTree(custom_rules=processed_rules, criterion='gini', max_depth=5, random_state=42)
         clf.fit(X_train, y_train)
 
         # Make predictions
