@@ -3,7 +3,7 @@
 This is a tool to build semi-custom trees. Starting a from a custom tree, the tree is continued using sklearn's DecisionTreeClassifier. The tree is then pruned using a custom pruning algorithm. The tree is then converted to a semi-custom tree by replacing the leaf nodes with a custom model. The resulting tree can be written to an interactive HTML file.
 
 <div align="center">
-    <img src="images/TreeBuilder.webp" alt="TreeBuilder">
+  <img src="images/TreeBuilder.webp" alt="TreeBuilder" width="400px">
 </div>
 
 Basic usage:
