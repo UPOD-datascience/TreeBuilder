@@ -75,3 +75,5 @@ sklearn_tree = treeBuilder.load_from_sklearn_tree(clf_base, X_train_imputed, y_t
 final_tree_sklearn = sklearn_tree.get_custom_rules_model()
 update_html(final_tree_sklearn, output_path='bla')
 ```
+
+[Here](https://rawcdn.githack.com/UPOD-datascience/TreeBuilder/54202eb691e52bc5dd531c41b0dab0014ab7b7b5/artifacts/tree_Fold0_0.html) you can find an interactive example.
