@@ -757,32 +757,59 @@ class CustomDecisionTree(BaseEstimator, ClassifierMixin):
 
     def load_from_sklearn_tree(self, sklearn_tree: DecisionTreeClassifier, X: pd.DataFrame, y: np.ndarray):
         self.feature_names_ = X.columns.tolist()
-        self.classes_ = np.unique(y)
+        self.classes_ = sklearn_tree.classes_
         self.n_classes_ = len(self.classes_)
-        total_class_counts = np.bincount(y)
+        tree = sklearn_tree.tree_
+
+        # Map class labels to indices for alignment
+        class_indices = {cls: idx for idx, cls in enumerate(self.classes_)}
+
+        # Get total class counts from y
+        total_class_counts = np.zeros(len(self.classes_), dtype=float)
+        for cls in y:
+            idx = class_indices[cls]
+            total_class_counts[idx] += 1
+
+        # Get the decision path for each sample
+        node_indicator = sklearn_tree.decision_path(X)
+
+        # For each node, collect indices of samples that reach it
+        node_sample_indices = {}
+        for sample_id in range(X.shape[0]):
+            node_indices = node_indicator.indices[node_indicator.indptr[sample_id]:node_indicator.indptr[sample_id + 1]]
+            for node_id in node_indices:
+                if node_id not in node_sample_indices:
+                    node_sample_indices[node_id] = []
+                node_sample_indices[node_id].append(sample_id)
 
         def build_custom_tree(node_id: int, depth: int = 0) -> RuleNode:
-            tree = sklearn_tree.tree_
             feature = tree.feature[node_id]
             threshold = tree.threshold[node_id]
-            n_node_samples = tree.n_node_samples[node_id]
-            value = tree.value[node_id][0] # TODO: this is not the class count
 
-            if tree.feature[node_id] != -2:  # Not a leaf node
+            # Get samples that reach this node
+            samples_at_node = node_sample_indices.get(node_id, [])
+            n_node_samples = len(samples_at_node)
+
+            # Get class counts at this node
+            y_at_node = y[samples_at_node]
+            class_counts = np.zeros(len(self.classes_), dtype=float)
+            for cls in y_at_node:
+                idx = class_indices[cls]
+                class_counts[idx] += 1
+
+            if feature != -2:  # Not a leaf node
                 feature_name = self.feature_names_[feature]
                 custom_node = RuleNode(
                     name=f"node_{node_id}",
                     feature=feature_name,
                     condition='less_than_or_equal',
                     threshold=threshold,
-                    class_counts=[int(n_node_samples*_v) for _v in value.tolist()],
-                    samples=int(n_node_samples),
+                    class_counts=class_counts.tolist(),
+                    samples=n_node_samples,
                     is_custom=False
                 )
-
                 left_child = build_custom_tree(tree.children_left[node_id], depth + 1)
                 right_child = build_custom_tree(tree.children_right[node_id], depth + 1)
-
                 custom_node.add_child(left_child)
                 custom_node.add_child(right_child)
             else:  # Leaf node
@@ -790,18 +817,36 @@ class CustomDecisionTree(BaseEstimator, ClassifierMixin):
                     name=f"leaf_{node_id}",
                     feature=None,
                     condition=None,
-                    class_counts=[int(n_node_samples*_v) for _v in value.tolist()],
-                    samples=int(n_node_samples),
+                    class_counts=class_counts.tolist(),
+                    samples=n_node_samples,
                     is_custom=False
                 )
-            custom_node.probas = (np.array(custom_node.class_counts) / np.sum(custom_node.class_counts)).tolist()
-            custom_node.coverage = (np.array(custom_node.class_counts) / total_class_counts).tolist()
+
+            # Calculating probabilities safely
+            probas_denominator = np.sum(class_counts)
+            if probas_denominator > 0:
+                custom_node.probas = (class_counts / probas_denominator).tolist()
+            else:
+                custom_node.probas = [0.0] * len(class_counts)
+
+            # Calculating coverage per class
+            coverage = np.zeros(len(self.classes_), dtype=float)
+            for idx, total_count in enumerate(total_class_counts):
+                if total_count > 0:
+                    coverage[idx] = class_counts[idx] / total_count
+                else:
+                    coverage[idx] = 0.0
+            custom_node.coverage = coverage.tolist()
             return custom_node
 
         self.tree_ = build_custom_tree(0)
         self.enriched_rules = self.tree_
 
         return self
+
+
+
+
 
     def generate_metrics(self, X: pd.DataFrame = None,
                          y: np.ndarray = None,
