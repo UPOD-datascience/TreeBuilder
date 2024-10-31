@@ -786,6 +786,9 @@ class CustomDecisionTree(BaseEstimator, ClassifierMixin):
             feature = tree.feature[node_id]
             threshold = tree.threshold[node_id]
 
+            # add model probabilities as well
+            model_probas = tree.value[node_id][0]
+
             # Get samples that reach this node
             samples_at_node = node_sample_indices.get(node_id, [])
             n_node_samples = len(samples_at_node)
