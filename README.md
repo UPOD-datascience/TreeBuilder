@@ -1,6 +1,7 @@
 # TreeBuilder
 
-This is a tool to build semi-custom trees. Starting a from a custom tree, the tree is continued using sklearn's DecisionTreeClassifier. The tree is then pruned using a custom pruning algorithm. The tree is then converted to a semi-custom tree by replacing the leaf nodes with a custom model. The resulting tree can be written to an interactive HTML file.
+This is a tool to build semi-custom trees. Starting a from a custom tree, the tree is continued using sklearn's DecisionTreeClassifier. The tree is then pruned using a custom pruning algorithm. The tree is then converted to a semi-custom tree by replacing the leaf nodes with a custom model. The resulting tree can be written to an interactive HTML file, for example [**here**](https://rawcdn.githack.com/UPOD-datascience/TreeBuilder/54202eb691e52bc5dd531c41b0dab0014ab7b7b5/artifacts/tree_Fold0_0.html) you can find an interactive example.
+
 
 <div align="center">
   <img src="images/TreeBuilder.webp" alt="TreeBuilder" width="400px">
